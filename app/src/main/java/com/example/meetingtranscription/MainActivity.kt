@@ -1,11 +1,13 @@
 package com.example.meetingtranscription
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.MediaPlayer
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
@@ -30,12 +32,15 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var btnToggleRecording: MaterialButton
     private lateinit var tvStatus: TextView
+    private lateinit var tvTranscript: TextView
     private lateinit var listView: ListView
     private lateinit var btnRefresh: ImageButton
+    private lateinit var btnModel: ImageButton
     private var isRecording = false
     private val recordingFiles = mutableListOf<File>()
     private var adapter: ArrayAdapter<String>? = null
     private var mediaPlayer: MediaPlayer? = null
+    private var paraformerReady = false
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -58,6 +63,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
         initViews()
         refreshFileList()
+        checkModel()
     }
 
     override fun onResume() {
@@ -73,8 +79,10 @@ class MainActivity : AppCompatActivity() {
     private fun initViews() {
         btnToggleRecording = findViewById(R.id.btnToggleRecording)
         tvStatus = findViewById(R.id.tvStatus)
+        tvTranscript = findViewById(R.id.tvTranscript)
         listView = findViewById(R.id.listView)
         btnRefresh = findViewById(R.id.btnRefresh)
+        btnModel = findViewById(R.id.btnModel)
 
         btnToggleRecording.setOnClickListener {
             if (isRecording) {
@@ -90,11 +98,63 @@ class MainActivity : AppCompatActivity() {
 
         btnRefresh.setOnClickListener { refreshFileList() }
 
+        btnModel.setOnClickListener { showModelGuideDialog() }
+
         listView.onItemClickListener = AdapterView.OnItemClickListener { _, _, position, _ ->
             if (position < recordingFiles.size) {
                 showFileOptions(recordingFiles[position])
             }
         }
+    }
+
+    /**
+     * 检查模型是否存在
+     */
+    private fun checkModel() {
+        val modelPaths = listOf(
+            "/storage/emulated/0/ParaformerModels/paraformer-small.onnx",
+            "/sdcard/ParaformerModels/paraformer-small.onnx",
+            "${filesDir.absolutePath}/paraformer-small.onnx"
+        )
+
+        paraformerReady = modelPaths.any { File(it).exists() }
+
+        if (!paraformerReady) {
+            tvTranscript.text = "⚠ 未检测到语音模型\n点击 📦 按钮下载 paraformer-small.onnx"
+        }
+    }
+
+    /**
+     * 显示模型下载引导
+     */
+    private fun showModelGuideDialog() {
+        val modelStatus = if (paraformerReady) "✅ 模型已就绪" else "❌ 未检测到模型"
+
+        AlertDialog.Builder(this)
+            .setTitle("Paraformer 语音模型")
+            .setMessage(
+                "$modelStatus\n\n" +
+                "下载 paraformer-small.onnx 模型：\n\n" +
+                "方法一（推荐）：\n" +
+                "1. 在手机浏览器打开：\n" +
+                "   https://www.modelscope.cn/models/damo/\n" +
+                "   speech_paraformer_asr_nat-zh-cn-16k-\n" +
+                "   common-vocab8404-pytorch/summary\n" +
+                "2. 下载并导出为 ONNX 格式\n" +
+                "3. 将 paraformer-small.onnx 放到手机存储的\n" +
+                "   ParaformerModels/ 目录\n\n" +
+                "方法二：\n" +
+                "也可以使用其他 ONNX 格式的中文语音识别模型，\n" +
+                "放入 ParaformerModels/ 目录即可\n\n" +
+                "⚠ 模型约 100MB，需要 16kHz 单声道输入"
+            )
+            .setPositiveButton("知道了") { _, _ -> }
+            .setNeutralButton("检查模型") { _, _ ->
+                checkModel()
+                val msg = if (paraformerReady) "✅ 模型已就绪" else "❌ 仍未找到模型"
+                Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+            }
+            .show()
     }
 
     private fun getRecordingsDir(): File {
@@ -107,16 +167,16 @@ class MainActivity : AppCompatActivity() {
         recordingFiles.clear()
         val dir = getRecordingsDir()
         val files = dir.listFiles() ?: emptyArray()
-        // 按修改时间倒序排列
-        recordingFiles.addAll(files.filter { it.name.endsWith(".mp3") }.sortedByDescending { it.lastModified() })
+        recordingFiles.addAll(files.filter { it.name.endsWith(".wav") }.sortedByDescending { it.lastModified() })
 
         val displayNames = recordingFiles.map { file ->
             val name = file.nameWithoutExtension
             val txtFile = File(file.parent, "${name}.txt")
-            val hasText = if (txtFile.exists()) " ✓有转录" else ""
+            val hasText = if (txtFile.exists()) " ✓" else ""
             "$name$hasText"
         }
 
+        adapter?.clear()
         if (displayNames.isEmpty()) {
             adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1,
                 mutableListOf("暂无录音记录，点击下方按钮开始录音"))
@@ -157,7 +217,7 @@ class MainActivity : AppCompatActivity() {
                     releaseMediaPlayer()
                 }
                 setOnErrorListener { _, what, extra ->
-                    Toast.makeText(this@MainActivity, "播放失败: $what", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(this@MainActivity, "播放失败", Toast.LENGTH_SHORT).show()
                     releaseMediaPlayer()
                     true
                 }
@@ -254,6 +314,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun startRecording() {
         try {
+            tvTranscript.text = "正在录音..."
             val serviceIntent = Intent(this, TranscriptionService::class.java).apply {
                 action = TranscriptionService.ACTION_START
             }
@@ -280,8 +341,22 @@ class MainActivity : AppCompatActivity() {
             startService(serviceIntent)
             isRecording = false
             updateUI()
-            // 刷新列表显示新录音
-            refreshFileList()
+            tvTranscript.text = "正在识别中，请稍候..."
+            // 延迟刷新列表（等识别完成）
+            listView.postDelayed({ refreshFileList() }, 5000)
+            listView.postDelayed({
+                // 尝试读取最新的转录文件
+                val dir = getRecordingsDir()
+                val files = dir.listFiles()?.filter { it.name.endsWith(".txt") }
+                    ?.sortedByDescending { it.lastModified() }
+                if (files != null && files.isNotEmpty()) {
+                    try {
+                        tvTranscript.text = files.first().readText()
+                    } catch (_: Exception) {}
+                } else {
+                    tvTranscript.text = "转录完成（查看录音列表中的 ✓ 标记条目）"
+                }
+            }, 5000)
         } catch (e: Exception) {
             tvStatus.text = "停止录音出错: ${e.localizedMessage ?: "未知错误"}"
         }

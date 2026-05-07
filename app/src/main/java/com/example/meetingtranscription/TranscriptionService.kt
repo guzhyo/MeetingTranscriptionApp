@@ -3,6 +3,8 @@ package com.example.meetingtranscription
 import android.app.*
 import android.content.Context
 import android.content.Intent
+import android.media.AudioFormat
+import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Build
 import android.os.IBinder
@@ -21,20 +23,27 @@ class TranscriptionService : Service() {
         const val ACTION_STOP = "ACTION_STOP"
         const val NOTIFICATION_ID = 1
         const val CHANNEL_ID = "transcription_channel"
+        const val SAMPLE_RATE = 16000
+        const val BUFFER_SIZE = 3200
         private const val TAG = "TranscriptionService"
     }
 
-    private var mediaRecorder: MediaRecorder? = null
+    private var audioRecord: AudioRecord? = null
     private var isRecording = false
     private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var wakeLock: PowerManager.WakeLock? = null
-    private var outputMp3File: File? = null
+    private var outputWavFile: File? = null
     private var outputTxtFile: File? = null
     private var hasError = false
+    private var pcmBuffer = ByteArrayOutputStream()
+    private var totalSamples = 0
+    private var paraformerEngine: ParaformerEngine? = null
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        // 初始化 Paraformer 引擎
+        paraformerEngine = ParaformerEngine(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -105,46 +114,98 @@ class TranscriptionService : Service() {
     private fun startRecording() {
         if (isRecording) return
         hasError = false
+        pcmBuffer.reset()
+        totalSamples = 0
 
         try {
             startForeground(NOTIFICATION_ID, createNotification())
             acquireWakeLock()
 
+            // 检查 Paraformer 引擎
+            val engine = paraformerEngine
+            if (engine != null && !engine.isReady()) {
+                Log.i(TAG, "初始化 Paraformer 引擎...")
+                engine.initialize()
+            }
+
             // 创建输出文件
             val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
             val recordingsDir = getRecordingsDir()
-            outputMp3File = File(recordingsDir, "录音_$timestamp.mp3")
+            outputWavFile = File(recordingsDir, "录音_$timestamp.wav")
             outputTxtFile = File(recordingsDir, "录音_$timestamp.txt")
 
-            // 使用 MediaRecorder 直接录制 MP3
-            mediaRecorder = MediaRecorder().apply {
-                setAudioSource(MediaRecorder.AudioSource.MIC)
-                setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                setAudioSamplingRate(16000)
-                setAudioEncodingBitRate(32000)
-                setOutputFile(outputMp3File!!.absolutePath)
+            // 初始化为 PCM 16-bit 16kHz 格式
+            val minBufferSize = AudioRecord.getMinBufferSize(
+                SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT
+            )
 
-                setOnErrorListener { _, what, extra ->
-                    Log.e(TAG, "MediaRecorder 错误: what=$what, extra=$extra")
-                    hasError = true
-                }
+            if (minBufferSize == AudioRecord.ERROR || minBufferSize == AudioRecord.ERROR_BAD_VALUE) {
+                throw IllegalStateException("不支持的录音参数")
+            }
 
-                try {
-                    prepare()
-                } catch (e: Exception) {
-                    throw IllegalStateException("录音准备失败: ${e.localizedMessage ?: "未知错误"}")
-                }
+            audioRecord = AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                minBufferSize.coerceAtLeast(BUFFER_SIZE * 2)
+            )
 
-                start()
+            if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
+                throw IllegalStateException("录音初始化失败，请检查麦克风权限")
+            }
+
+            audioRecord?.startRecording()
+            if (audioRecord?.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+                throw IllegalStateException("无法开始录音，麦克风可能被占用")
             }
 
             isRecording = true
-            Log.i(TAG, "录音已启动: ${outputMp3File!!.name}")
 
+            // 启动录音循环
+            serviceScope.launch {
+                try {
+                    recordAudio()
+                } catch (e: Exception) {
+                    Log.e(TAG, "录音循环异常", e)
+                    hasError = true
+                    withContext(Dispatchers.Main) {
+                        stopRecording()
+                    }
+                }
+            }
         } catch (e: Exception) {
             Log.e(TAG, "启动录音失败", e)
             handleStartError(e)
+        }
+    }
+
+    private suspend fun recordAudio() {
+        val buffer = ShortArray(BUFFER_SIZE)
+
+        while (isRecording && !hasError) {
+            val readSize = try {
+                audioRecord?.read(buffer, 0, BUFFER_SIZE) ?: -1
+            } catch (e: Exception) {
+                Log.e(TAG, "读取音频数据失败", e)
+                -1
+            }
+
+            if (readSize > 0) {
+                // 保存 PCM 数据
+                for (i in 0 until readSize) {
+                    val v = buffer[i].toInt()
+                    pcmBuffer.write(v and 0xFF)
+                    pcmBuffer.write((v shr 8) and 0xFF)
+                }
+                totalSamples += readSize
+            } else if (readSize < 0) {
+                delay(100)
+            } else {
+                delay(10)
+            }
         }
     }
 
@@ -157,8 +218,8 @@ class TranscriptionService : Service() {
                 .setSmallIcon(android.R.drawable.ic_btn_speak_now)
                 .setOngoing(false)
                 .build()
-            val notificationManager = getSystemService(NotificationManager::class.java)
-            notificationManager.notify(NOTIFICATION_ID + 1, notification)
+            val nm = getSystemService(NotificationManager::class.java)
+            nm.notify(NOTIFICATION_ID + 1, notification)
         } catch (_: Exception) {}
         cleanupResources()
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -171,40 +232,22 @@ class TranscriptionService : Service() {
 
         serviceScope.launch {
             try {
-                // 停止 MediaRecorder
-                mediaRecorder?.apply {
-                    try {
-                        stop()
-                    } catch (e: Exception) {
-                        Log.e(TAG, "停止 MediaRecorder 失败", e)
-                    }
-                    try {
-                        release()
-                    } catch (e: Exception) {
-                        Log.e(TAG, "释放 MediaRecorder 失败", e)
-                    }
-                }
-                mediaRecorder = null
+                val pcmData = pcmBuffer.toByteArray()
 
-                // 检查录音文件是否有效
-                val mp3File = outputMp3File
-                if (mp3File != null && mp3File.exists() && mp3File.length() > 1024) {
-                    // 写入转录文件（模拟转录，实际应集成模型）
-                    val durationSec = mp3File.length() / 32000 / 2 // 估算时长
-                    outputTxtFile?.writeText("会议录音 ${mp3File.nameWithoutExtension}\n")
-                    outputTxtFile?.appendText("录音时间: $timestamp\n")
-                    outputTxtFile?.appendText("文件大小: ${mp3File.length() / 1024} KB\n")
-                    outputTxtFile?.appendText("采样率: 16kHz, AAC编码\n")
-                    outputTxtFile?.appendText("---\n")
-                    outputTxtFile?.appendText("[注] 此处为模拟转录文本。\n")
-                    outputTxtFile?.appendText("请将 paraformer-small.onnx 模型放入 assets 目录以启用真实语音识别。\n")
+                if (pcmData.size > 32000) { // 至少 1 秒
+                    // 1. 保存 WAV 文件
+                    saveWavFile(pcmData)
 
-                    Log.i(TAG, "录音完成: ${mp3File.name}, ${mp3File.length() / 1024}KB")
+                    // 2. 用 Paraformer 进行语音识别
+                    val transcript = recognizeWithParaformer(pcmData)
+
+                    // 3. 保存转录文件
+                    saveTranscriptFile(transcript)
+
                 } else {
-                    // 录音文件无效（太短或为空），删除
-                    mp3File?.delete()
+                    Log.w(TAG, "录音太短，不保存")
+                    outputWavFile?.delete()
                     outputTxtFile?.delete()
-                    Log.w(TAG, "录音文件过短或为空，已删除")
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "停止录音时出错", e)
@@ -216,14 +259,102 @@ class TranscriptionService : Service() {
         }
     }
 
-    // 供 MainActivity 获取当前录音时间戳（用于文件名显示）
-    private var timestamp: String = ""
+    /**
+     * 保存 WAV 文件
+     */
+    private fun saveWavFile(pcmData: ByteArray) {
+        val wavFile = outputWavFile ?: return
+        try {
+            RandomAccessFile(wavFile, "rw").use { raf ->
+                raf.writeBytes("RIFF")
+                raf.writeInt(Integer.reverseBytes(36 + pcmData.size))
+                raf.writeBytes("WAVE")
+                raf.writeBytes("fmt ")
+                raf.writeInt(Integer.reverseBytes(16))
+                raf.writeShort(Integer.reverseBytes(1)) // PCM
+                raf.writeShort(Integer.reverseBytes(1)) // mono
+                raf.writeInt(Integer.reverseBytes(16000)) // sample rate
+                raf.writeInt(Integer.reverseBytes(32000)) // byte rate
+                raf.writeShort(Integer.reverseBytes(2)) // block align
+                raf.writeShort(Integer.reverseBytes(16)) // bits per sample
+                raf.writeBytes("data")
+                raf.writeInt(Integer.reverseBytes(pcmData.size))
+                raf.write(pcmData)
+            }
+            Log.i(TAG, "WAV 文件已保存: ${wavFile.name}, ${pcmData.size / 32000}秒")
+        } catch (e: Exception) {
+            Log.e(TAG, "保存 WAV 文件失败", e)
+        }
+    }
+
+    /**
+     * 用 Paraformer 识别语音
+     */
+    private fun recognizeWithParaformer(pcmData: ByteArray): String {
+        val engine = paraformerEngine
+        if (engine == null) {
+            return "[错误: 引擎未初始化]"
+        }
+
+        // 确保引擎已初始化
+        if (!engine.isReady()) {
+            val ok = engine.initialize()
+            if (!ok) {
+                return engine.getInitError() ?: "模型初始化失败，请将 paraformer-small.onnx 放入手机存储的 ParaformerModels/ 目录"
+            }
+        }
+
+        // 将 PCM 字节数据转为 ShortArray
+        val shortArray = ShortArray(pcmData.size / 2)
+        for (i in shortArray.indices) {
+            val low = pcmData[i * 2].toInt() and 0xFF
+            val high = pcmData[i * 2 + 1].toInt() and 0xFF
+            shortArray[i] = (low or (high shl 8)).toShort()
+        }
+
+        val text = engine.recognize(shortArray)
+        return text
+    }
+
+    /**
+     * 保存转录文字文件
+     */
+    private fun saveTranscriptFile(transcript: String) {
+        val txtFile = outputTxtFile ?: return
+        val wavFile = outputWavFile ?: return
+
+        try {
+            val durationSec = if (wavFile.exists()) {
+                wavFile.length() / 32000
+            } else 0
+
+            txtFile.writeText("会议录音 ${wavFile.nameWithoutExtension}\n")
+            txtFile.appendText("录音时间: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())}\n")
+            txtFile.appendText("录音时长: ${durationSec}秒\n")
+            txtFile.appendText("采样率: 16kHz, 16bit, 单声道\n")
+            txtFile.appendText("识别引擎: Paraformer-small (ONNX Runtime)\n")
+            txtFile.appendText("---\n\n")
+
+            if (transcript.isNotEmpty() && !transcript.startsWith("[") && !transcript.startsWith("模型")) {
+                txtFile.appendText(transcript)
+            } else if (transcript.isNotEmpty()) {
+                txtFile.appendText("[识别结果] $transcript")
+            } else {
+                txtFile.appendText("[未检测到语音内容]")
+            }
+
+            Log.i(TAG, "转录文件已保存: ${txtFile.name}")
+        } catch (e: Exception) {
+            Log.e(TAG, "保存转录文件失败", e)
+        }
+    }
 
     private fun cleanupResources() {
-        mediaRecorder?.apply {
+        audioRecord?.apply {
+            try { stop() } catch (_: Exception) {}
             try { release() } catch (_: Exception) {}
         }
-        mediaRecorder = null
+        audioRecord = null
 
         wakeLock?.let {
             try { if (it.isHeld) it.release() } catch (_: Exception) {}
@@ -237,5 +368,7 @@ class TranscriptionService : Service() {
         hasError = true
         serviceScope.cancel()
         cleanupResources()
+        paraformerEngine?.release()
+        paraformerEngine = null
     }
 }

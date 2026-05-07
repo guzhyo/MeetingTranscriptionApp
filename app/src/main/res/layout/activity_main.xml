@@ -4,23 +4,34 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:padding="16dp">
+    android:padding="12dp">
 
     <!-- 顶部标题栏 -->
     <RelativeLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginBottom="12dp">
+        android:layout_marginBottom="8dp">
 
         <TextView
             android:id="@+id/tvTitle"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="会议录音实时转录"
-            android:textSize="22sp"
+            android:text="会议录音转录"
+            android:textSize="20sp"
             android:textStyle="bold"
             android:layout_centerVertical="true"
             android:layout_alignParentStart="true" />
+
+        <ImageButton
+            android:id="@+id/btnModel"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:layout_toStartOf="@id/btnRefresh"
+            android:layout_centerVertical="true"
+            android:layout_marginEnd="4dp"
+            android:src="@android:drawable/ic_menu_manage"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="模型管理" />
 
         <ImageButton
             android:id="@+id/btnRefresh"
@@ -37,33 +48,47 @@
     <!-- 状态文字 -->
     <TextView
         android:id="@+id/tvStatus"
-        android:layout_width="wrap_content"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="@string/idle_status"
-        android:textSize="14sp"
+        android:textSize="13sp"
         android:textColor="@color/teal_700"
-        android:layout_marginBottom="12dp" />
+        android:layout_marginBottom="8dp" />
 
     <!-- 录音按钮 -->
     <com.google.android.material.button.MaterialButton
         android:id="@+id/btnToggleRecording"
-        android:layout_width="120dp"
-        android:layout_height="120dp"
+        android:layout_width="100dp"
+        android:layout_height="100dp"
         android:text="@string/start_recording"
-        android:textSize="14sp"
-        app:cornerRadius="60dp"
+        android:textSize="13sp"
+        app:cornerRadius="50dp"
         android:backgroundTint="@color/green_500"
         android:layout_gravity="center_horizontal"
-        android:layout_marginBottom="16dp" />
+        android:layout_marginBottom="8dp" />
+
+    <!-- 转录结果显示区域 -->
+    <TextView
+        android:id="@+id/tvTranscript"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:text="转录内容将显示在这里..."
+        android:textSize="13sp"
+        android:lineSpacingMultiplier="1.2"
+        android:padding="8dp"
+        android:background="@android:drawable/editbox_background"
+        android:layout_marginBottom="8dp"
+        android:gravity="top" />
 
     <!-- 分隔标签 -->
     <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="录音列表"
-        android:textSize="16sp"
+        android:textSize="15sp"
         android:textStyle="bold"
-        android:layout_marginBottom="4dp" />
+        android:layout_marginBottom="2dp" />
 
     <!-- 录音文件列表 -->
     <ListView
