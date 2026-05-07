@@ -37,7 +37,7 @@ class ParaformerEngine(private val context: Context) {
             val modelFile = findModelFile()
             if (modelFile == null) {
                 initError = "模型文件未找到，请将 $MODEL_NAME 放入手机存储的 ParaformerModels/ 目录"
-                Log.w(TAG, initError)
+                Log.w(TAG, initError!!)
                 return false
             }
 
