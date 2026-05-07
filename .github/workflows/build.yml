@@ -30,8 +30,12 @@ jobs:
         run: |
           echo "sdk.dir=$ANDROID_HOME" > local.properties
 
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew
+      - name: Download Gradle Wrapper JAR
+        run: |
+          curl -sL "https://services.gradle.org/distributions/gradle-8.1.1-bin.zip" -o /tmp/gradle.zip
+          unzip -q /tmp/gradle.zip -d /tmp/gradle
+          /tmp/gradle/gradle-8.1.1/bin/gradle wrapper --gradle-version 8.1.1
+          chmod +x gradlew
 
       - name: Build with Gradle
         run: ./gradlew assembleDebug --no-daemon
