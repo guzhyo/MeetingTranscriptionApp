@@ -36,14 +36,12 @@ class TranscriptionService : Service() {
     private var outputTxtFile: File? = null
     private var hasError = false
     private var pcmBuffer = ByteArrayOutputStream()
-    private var totalSamples = 0
-    private var paraformerEngine: ParaformerEngine? = null
+    private var voskEngine: VoskEngine? = null
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        // 初始化 Paraformer 引擎
-        paraformerEngine = ParaformerEngine(this)
+        voskEngine = VoskEngine(this)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -74,8 +72,8 @@ class TranscriptionService : Service() {
                     setSound(null, null)
                     enableVibration(false)
                 }
-                val notificationManager = getSystemService(NotificationManager::class.java)
-                notificationManager.createNotificationChannel(channel)
+                val nm = getSystemService(NotificationManager::class.java)
+                nm.createNotificationChannel(channel)
             } catch (e: Exception) {
                 Log.e(TAG, "创建通知渠道失败", e)
             }
@@ -99,13 +97,11 @@ class TranscriptionService : Service() {
 
     private fun acquireWakeLock() {
         try {
-            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-            wakeLock = powerManager.newWakeLock(
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(
                 PowerManager.PARTIAL_WAKE_LOCK,
                 "MeetingTranscription::RecordingWakeLock"
-            ).apply {
-                acquire(10 * 60 * 1000L)
-            }
+            ).apply { acquire(10 * 60 * 1000L) }
         } catch (e: Exception) {
             Log.w(TAG, "获取 WakeLock 失败", e)
         }
@@ -115,33 +111,24 @@ class TranscriptionService : Service() {
         if (isRecording) return
         hasError = false
         pcmBuffer.reset()
-        totalSamples = 0
 
         try {
             startForeground(NOTIFICATION_ID, createNotification())
             acquireWakeLock()
 
-            // 检查 Paraformer 引擎
-            val engine = paraformerEngine
-            if (engine != null && !engine.isReady()) {
-                Log.i(TAG, "初始化 Paraformer 引擎...")
-                engine.initialize()
-            }
-
             // 创建输出文件
-            val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-            val recordingsDir = getRecordingsDir()
-            outputWavFile = File(recordingsDir, "录音_$timestamp.wav")
-            outputTxtFile = File(recordingsDir, "录音_$timestamp.txt")
+            val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+            val dir = getRecordingsDir()
+            outputWavFile = File(dir, "录音_$ts.wav")
+            outputTxtFile = File(dir, "录音_$ts.txt")
 
-            // 初始化为 PCM 16-bit 16kHz 格式
-            val minBufferSize = AudioRecord.getMinBufferSize(
+            // 初始化录音
+            val minBuf = AudioRecord.getMinBufferSize(
                 SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT
             )
-
-            if (minBufferSize == AudioRecord.ERROR || minBufferSize == AudioRecord.ERROR_BAD_VALUE) {
+            if (minBuf == AudioRecord.ERROR || minBuf == AudioRecord.ERROR_BAD_VALUE) {
                 throw IllegalStateException("不支持的录音参数")
             }
 
@@ -150,13 +137,11 @@ class TranscriptionService : Service() {
                 SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
-                minBufferSize.coerceAtLeast(BUFFER_SIZE * 2)
+                minBuf.coerceAtLeast(BUFFER_SIZE * 2)
             )
-
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
                 throw IllegalStateException("录音初始化失败，请检查麦克风权限")
             }
-
             audioRecord?.startRecording()
             if (audioRecord?.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
                 throw IllegalStateException("无法开始录音，麦克风可能被占用")
@@ -164,66 +149,44 @@ class TranscriptionService : Service() {
 
             isRecording = true
 
-            // 启动录音循环
+            // 录音循环
             serviceScope.launch {
                 try {
                     recordAudio()
                 } catch (e: Exception) {
                     Log.e(TAG, "录音循环异常", e)
                     hasError = true
-                    withContext(Dispatchers.Main) {
-                        stopRecording()
-                    }
+                    withContext(Dispatchers.Main) { stopRecording() }
                 }
             }
         } catch (e: Exception) {
             Log.e(TAG, "启动录音失败", e)
-            handleStartError(e)
+            hasError = true
+            cleanupResources()
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf()
         }
     }
 
     private suspend fun recordAudio() {
         val buffer = ShortArray(BUFFER_SIZE)
-
         while (isRecording && !hasError) {
-            val readSize = try {
+            val n = try {
                 audioRecord?.read(buffer, 0, BUFFER_SIZE) ?: -1
-            } catch (e: Exception) {
-                Log.e(TAG, "读取音频数据失败", e)
-                -1
-            }
+            } catch (e: Exception) { -1 }
 
-            if (readSize > 0) {
-                // 保存 PCM 数据
-                for (i in 0 until readSize) {
+            if (n > 0) {
+                for (i in 0 until n) {
                     val v = buffer[i].toInt()
                     pcmBuffer.write(v and 0xFF)
                     pcmBuffer.write((v shr 8) and 0xFF)
                 }
-                totalSamples += readSize
-            } else if (readSize < 0) {
+            } else if (n < 0) {
                 delay(100)
             } else {
                 delay(10)
             }
         }
-    }
-
-    private fun handleStartError(e: Exception) {
-        hasError = true
-        try {
-            val notification = NotificationCompat.Builder(this, CHANNEL_ID)
-                .setContentTitle("录音启动失败")
-                .setContentText(e.localizedMessage ?: "未知错误")
-                .setSmallIcon(android.R.drawable.ic_btn_speak_now)
-                .setOngoing(false)
-                .build()
-            val nm = getSystemService(NotificationManager::class.java)
-            nm.notify(NOTIFICATION_ID + 1, notification)
-        } catch (_: Exception) {}
-        cleanupResources()
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
     }
 
     private fun stopRecording() {
@@ -233,35 +196,23 @@ class TranscriptionService : Service() {
         serviceScope.launch {
             try {
                 val pcmData = pcmBuffer.toByteArray()
-
-                if (pcmData.size > 32000) { // 至少 1 秒
-                    // 1. 保存 WAV 文件
+                if (pcmData.size > 32000) {
                     saveWavFile(pcmData)
-
-                    // 2. 用 Paraformer 进行语音识别
-                    val transcript = recognizeWithParaformer(pcmData)
-
-                    // 3. 保存转录文件
+                    val transcript = recognizeWithVosk(pcmData)
                     saveTranscriptFile(transcript)
-
                 } else {
-                    Log.w(TAG, "录音太短，不保存")
                     outputWavFile?.delete()
                     outputTxtFile?.delete()
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "停止录音时出错", e)
             }
-
             cleanupResources()
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
         }
     }
 
-    /**
-     * 保存 WAV 文件
-     */
     private fun saveWavFile(pcmData: ByteArray) {
         val wavFile = outputWavFile ?: return
         try {
@@ -271,79 +222,48 @@ class TranscriptionService : Service() {
                 raf.writeBytes("WAVE")
                 raf.writeBytes("fmt ")
                 raf.writeInt(Integer.reverseBytes(16))
-                raf.writeShort(Integer.reverseBytes(1)) // PCM
-                raf.writeShort(Integer.reverseBytes(1)) // mono
-                raf.writeInt(Integer.reverseBytes(16000)) // sample rate
-                raf.writeInt(Integer.reverseBytes(32000)) // byte rate
-                raf.writeShort(Integer.reverseBytes(2)) // block align
-                raf.writeShort(Integer.reverseBytes(16)) // bits per sample
+                raf.writeShort(Integer.reverseBytes(1))
+                raf.writeShort(Integer.reverseBytes(1))
+                raf.writeInt(Integer.reverseBytes(16000))
+                raf.writeInt(Integer.reverseBytes(32000))
+                raf.writeShort(Integer.reverseBytes(2))
+                raf.writeShort(Integer.reverseBytes(16))
                 raf.writeBytes("data")
                 raf.writeInt(Integer.reverseBytes(pcmData.size))
                 raf.write(pcmData)
             }
-            Log.i(TAG, "WAV 文件已保存: ${wavFile.name}, ${pcmData.size / 32000}秒")
         } catch (e: Exception) {
-            Log.e(TAG, "保存 WAV 文件失败", e)
+            Log.e(TAG, "保存 WAV 失败", e)
         }
     }
 
-    /**
-     * 用 Paraformer 识别语音
-     */
-    private fun recognizeWithParaformer(pcmData: ByteArray): String {
-        val engine = paraformerEngine
-        if (engine == null) {
-            return "[错误: 引擎未初始化]"
-        }
-
-        // 确保引擎已初始化
+    private fun recognizeWithVosk(pcmData: ByteArray): String {
+        val engine = voskEngine ?: return "引擎未初始化"
         if (!engine.isReady()) {
             val ok = engine.initialize()
-            if (!ok) {
-                return engine.getInitError() ?: "模型初始化失败，请将 paraformer-small.onnx 放入手机存储的 ParaformerModels/ 目录"
-            }
+            if (!ok) return engine.getInitError() ?: "模型未就绪"
         }
 
-        // 将 PCM 字节数据转为 ShortArray
         val shortArray = ShortArray(pcmData.size / 2)
         for (i in shortArray.indices) {
             val low = pcmData[i * 2].toInt() and 0xFF
             val high = pcmData[i * 2 + 1].toInt() and 0xFF
             shortArray[i] = (low or (high shl 8)).toShort()
         }
-
-        val text = engine.recognize(shortArray)
-        return text
+        return engine.recognize(shortArray)
     }
 
-    /**
-     * 保存转录文字文件
-     */
     private fun saveTranscriptFile(transcript: String) {
         val txtFile = outputTxtFile ?: return
         val wavFile = outputWavFile ?: return
-
         try {
-            val durationSec = if (wavFile.exists()) {
-                wavFile.length() / 32000
-            } else 0
-
+            val sec = if (wavFile.exists()) wavFile.length() / 32000 else 0
             txtFile.writeText("会议录音 ${wavFile.nameWithoutExtension}\n")
             txtFile.appendText("录音时间: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())}\n")
-            txtFile.appendText("录音时长: ${durationSec}秒\n")
-            txtFile.appendText("采样率: 16kHz, 16bit, 单声道\n")
-            txtFile.appendText("识别引擎: Paraformer-small (ONNX Runtime)\n")
+            txtFile.appendText("录音时长: ${sec}秒\n")
+            txtFile.appendText("识别引擎: Vosk (vosk-model-small-cn-0.22)\n")
             txtFile.appendText("---\n\n")
-
-            if (transcript.isNotEmpty() && !transcript.startsWith("[") && !transcript.startsWith("模型")) {
-                txtFile.appendText(transcript)
-            } else if (transcript.isNotEmpty()) {
-                txtFile.appendText("[识别结果] $transcript")
-            } else {
-                txtFile.appendText("[未检测到语音内容]")
-            }
-
-            Log.i(TAG, "转录文件已保存: ${txtFile.name}")
+            txtFile.appendText(transcript.ifEmpty { "[未检测到语音内容]" })
         } catch (e: Exception) {
             Log.e(TAG, "保存转录文件失败", e)
         }
@@ -355,7 +275,6 @@ class TranscriptionService : Service() {
             try { release() } catch (_: Exception) {}
         }
         audioRecord = null
-
         wakeLock?.let {
             try { if (it.isHeld) it.release() } catch (_: Exception) {}
         }
@@ -368,7 +287,7 @@ class TranscriptionService : Service() {
         hasError = true
         serviceScope.cancel()
         cleanupResources()
-        paraformerEngine?.release()
-        paraformerEngine = null
+        voskEngine?.release()
+        voskEngine = null
     }
 }

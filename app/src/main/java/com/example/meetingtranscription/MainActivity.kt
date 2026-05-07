@@ -1,13 +1,11 @@
 package com.example.meetingtranscription
 
 import android.Manifest
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.MediaPlayer
 import android.os.Build
 import android.os.Bundle
-import android.os.Environment
 import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
@@ -40,7 +38,6 @@ class MainActivity : AppCompatActivity() {
     private val recordingFiles = mutableListOf<File>()
     private var adapter: ArrayAdapter<String>? = null
     private var mediaPlayer: MediaPlayer? = null
-    private var paraformerReady = false
 
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -50,11 +47,8 @@ class MainActivity : AppCompatActivity() {
             val deniedForever = REQUIRED_PERMISSIONS.any { perm ->
                 !results[perm]!! && !shouldShowRequestPermissionRationale(perm)
             }
-            if (deniedForever) {
-                showPermissionSettingsDialog()
-            } else {
-                Toast.makeText(this, "需要授权才能使用录音功能", Toast.LENGTH_SHORT).show()
-            }
+            if (deniedForever) showPermissionSettingsDialog()
+            else Toast.makeText(this, "需要授权才能使用录音功能", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -85,75 +79,69 @@ class MainActivity : AppCompatActivity() {
         btnModel = findViewById(R.id.btnModel)
 
         btnToggleRecording.setOnClickListener {
-            if (isRecording) {
-                stopRecording()
-            } else {
-                if (hasAllPermissions()) {
-                    startRecording()
-                } else {
-                    requestPermissions()
-                }
-            }
+            if (isRecording) stopRecording()
+            else if (hasAllPermissions()) startRecording()
+            else requestPermissions()
         }
-
         btnRefresh.setOnClickListener { refreshFileList() }
+        btnModel.setOnClickListener { showModelDialog() }
 
-        btnModel.setOnClickListener { showModelGuideDialog() }
-
-        listView.onItemClickListener = AdapterView.OnItemClickListener { _, _, position, _ ->
-            if (position < recordingFiles.size) {
-                showFileOptions(recordingFiles[position])
-            }
+        listView.onItemClickListener = AdapterView.OnItemClickListener { _, _, pos, _ ->
+            if (pos < recordingFiles.size) showFileOptions(recordingFiles[pos])
         }
     }
 
-    /**
-     * 检查模型是否存在
-     */
-    private fun checkModel() {
-        val modelPaths = listOf(
-            "/storage/emulated/0/ParaformerModels/paraformer-small.onnx",
-            "/sdcard/ParaformerModels/paraformer-small.onnx",
-            "${filesDir.absolutePath}/paraformer-small.onnx"
+    private fun findVoskModelDir(): File? {
+        val paths = listOf(
+            "/storage/emulated/0/VoskModels",
+            "/sdcard/VoskModels"
         )
+        for (basePath in paths) {
+            val base = File(basePath)
+            if (!base.exists()) continue
+            val dirs = base.listFiles { f -> f.isDirectory } ?: emptyArray()
+            for (dir in dirs) {
+                if (File(dir, "am/final.mdl").exists()) return dir
+            }
+            if (File(base, "am/final.mdl").exists()) return base
+        }
+        return null
+    }
 
-        paraformerReady = modelPaths.any { File(it).exists() }
-
-        if (!paraformerReady) {
-            tvTranscript.text = "⚠ 未检测到语音模型\n点击 📦 按钮下载 paraformer-small.onnx"
+    private fun checkModel() {
+        val modelDir = findVoskModelDir()
+        if (modelDir == null) {
+            tvTranscript.text = "⚠ 未检测到 Vosk 模型\n点击 📦 按钮查看如何安装"
+        } else {
+            tvTranscript.text = "✅ Vosk 模型已就绪（${modelDir.name}）\n点击开始录音"
         }
     }
 
-    /**
-     * 显示模型下载引导
-     */
-    private fun showModelGuideDialog() {
-        val modelStatus = if (paraformerReady) "✅ 模型已就绪" else "❌ 未检测到模型"
+    private fun showModelDialog() {
+        val modelDir = findVoskModelDir()
+        val status = if (modelDir != null) "✅ 模型已安装: ${modelDir.name}" else "❌ 未检测到模型"
 
         AlertDialog.Builder(this)
-            .setTitle("Paraformer 语音模型")
+            .setTitle("Vosk 离线语音模型")
             .setMessage(
-                "$modelStatus\n\n" +
-                "下载 paraformer-small.onnx 模型：\n\n" +
-                "方法一（推荐）：\n" +
+                "$status\n\n" +
+                "模型安装步骤：\n\n" +
                 "1. 在手机浏览器打开：\n" +
-                "   https://www.modelscope.cn/models/damo/\n" +
-                "   speech_paraformer_asr_nat-zh-cn-16k-\n" +
-                "   common-vocab8404-pytorch/summary\n" +
-                "2. 下载并导出为 ONNX 格式\n" +
-                "3. 将 paraformer-small.onnx 放到手机存储的\n" +
-                "   ParaformerModels/ 目录\n\n" +
-                "方法二：\n" +
-                "也可以使用其他 ONNX 格式的中文语音识别模型，\n" +
-                "放入 ParaformerModels/ 目录即可\n\n" +
-                "⚠ 模型约 100MB，需要 16kHz 单声道输入"
+                "   https://alphacephei.com/vosk/models\n\n" +
+                "2. 下载 vosk-model-small-cn-0.22.zip\n" +
+                "   （约 66MB，中文离线识别）\n\n" +
+                "3. 在手机存储中创建 VoskModels/ 目录\n\n" +
+                "4. 将 zip 解压到 VoskModels/ 下\n" +
+                "   最终路径应为：\n" +
+                "   /sdcard/VoskModels/vosk-model-small-cn-0.22/\n" +
+                "   ├── am/\n" +
+                "   │   └── final.mdl\n" +
+                "   └── ...\n\n" +
+                "💡 你手机里的 vosk-model-small-cn-0.22\n" +
+                "   已经在 ~/workspace/vosk_models/ 下了，\n" +
+                "   复制到 /sdcard/VoskModels/ 即可"
             )
-            .setPositiveButton("知道了") { _, _ -> }
-            .setNeutralButton("检查模型") { _, _ ->
-                checkModel()
-                val msg = if (paraformerReady) "✅ 模型已就绪" else "❌ 仍未找到模型"
-                Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
-            }
+            .setPositiveButton("知道了") { _, _ -> checkModel() }
             .show()
     }
 
@@ -169,35 +157,23 @@ class MainActivity : AppCompatActivity() {
         val files = dir.listFiles() ?: emptyArray()
         recordingFiles.addAll(files.filter { it.name.endsWith(".wav") }.sortedByDescending { it.lastModified() })
 
-        val displayNames = recordingFiles.map { file ->
-            val name = file.nameWithoutExtension
-            val txtFile = File(file.parent, "${name}.txt")
-            val hasText = if (txtFile.exists()) " ✓" else ""
-            "$name$hasText"
+        val names = recordingFiles.map { file ->
+            val txtFile = File(file.parent, "${file.nameWithoutExtension}.txt")
+            val mark = if (txtFile.exists()) " ✓" else ""
+            "${file.nameWithoutExtension}$mark"
         }
 
         adapter?.clear()
-        if (displayNames.isEmpty()) {
-            adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1,
-                mutableListOf("暂无录音记录，点击下方按钮开始录音"))
-        } else {
-            adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, displayNames)
-        }
+        adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1,
+            if (names.isEmpty()) mutableListOf("暂无录音记录，点击下方按钮开始录音") else names.toMutableList())
         listView.adapter = adapter
     }
 
     private fun showFileOptions(file: File) {
-        val name = file.nameWithoutExtension
-        val txtFile = File(file.parent, "${name}.txt")
-        val options = mutableListOf<String>().apply {
-            add("▶ 播放录音")
-            add("📝 查看转录文字")
-            add("🗑 删除录音")
-        }
-
+        val txtFile = File(file.parent, "${file.nameWithoutExtension}.txt")
         AlertDialog.Builder(this)
-            .setTitle(name)
-            .setItems(options.toTypedArray()) { _, which ->
+            .setTitle(file.nameWithoutExtension)
+            .setItems(arrayOf("▶ 播放录音", "📝 查看转录文字", "🗑 删除录音")) { _, which ->
                 when (which) {
                     0 -> playRecording(file)
                     1 -> showTranscription(txtFile)
@@ -216,36 +192,29 @@ class MainActivity : AppCompatActivity() {
                     Toast.makeText(this@MainActivity, "播放完毕", Toast.LENGTH_SHORT).show()
                     releaseMediaPlayer()
                 }
-                setOnErrorListener { _, what, extra ->
+                setOnErrorListener { _, _, _ ->
                     Toast.makeText(this@MainActivity, "播放失败", Toast.LENGTH_SHORT).show()
-                    releaseMediaPlayer()
-                    true
+                    releaseMediaPlayer(); true
                 }
                 prepare()
                 start()
             }
             Toast.makeText(this, "正在播放: ${file.nameWithoutExtension}", Toast.LENGTH_SHORT).show()
         } catch (e: Exception) {
-            Toast.makeText(this, "播放失败: ${e.localizedMessage ?: "未知错误"}", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "播放失败: ${e.localizedMessage ?: ""}", Toast.LENGTH_SHORT).show()
         }
     }
 
     private fun showTranscription(txtFile: File) {
-        val content = if (txtFile.exists()) {
-            txtFile.readText()
-        } else {
-            "暂无转录文字"
-        }
+        val content = if (txtFile.exists()) txtFile.readText() else "暂无转录文字"
         AlertDialog.Builder(this)
             .setTitle("转录文字 - ${txtFile.nameWithoutExtension}")
-            .setMessage(if (content.isBlank()) "（录音中未检测到语音内容）" else content)
+            .setMessage(content.ifBlank { "（录音中未检测到语音内容）" })
             .setPositiveButton("关闭", null)
             .setNeutralButton("分享") { _, _ ->
-                val shareIntent = Intent(Intent.ACTION_SEND).apply {
-                    type = "text/plain"
-                    putExtra(Intent.EXTRA_TEXT, content)
-                }
-                startActivity(Intent.createChooser(shareIntent, "分享转录文字"))
+                startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"; putExtra(Intent.EXTRA_TEXT, content)
+                }, "分享转录文字"))
             }
             .show()
     }
@@ -253,10 +222,9 @@ class MainActivity : AppCompatActivity() {
     private fun deleteRecording(wavFile: File, txtFile: File) {
         AlertDialog.Builder(this)
             .setTitle("确认删除")
-            .setMessage("确定要删除录音「${wavFile.nameWithoutExtension}」吗？")
+            .setMessage("确定要删除「${wavFile.nameWithoutExtension}」吗？")
             .setPositiveButton("删除") { _, _ ->
-                wavFile.delete()
-                if (txtFile.exists()) txtFile.delete()
+                wavFile.delete(); txtFile.delete()
                 refreshFileList()
                 Toast.makeText(this, "已删除", Toast.LENGTH_SHORT).show()
             }
@@ -265,32 +233,21 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun releaseMediaPlayer() {
-        try {
-            mediaPlayer?.apply {
-                if (isPlaying) stop()
-                release()
-            }
-        } catch (_: Exception) {}
+        try { mediaPlayer?.apply { if (isPlaying) stop(); release() } } catch (_: Exception) {}
         mediaPlayer = null
     }
 
-    private fun hasAllPermissions(): Boolean {
-        return REQUIRED_PERMISSIONS.all {
-            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
-        }
+    private fun hasAllPermissions(): Boolean = REQUIRED_PERMISSIONS.all {
+        ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
     }
 
     private fun requestPermissions() {
-        val needRationale = REQUIRED_PERMISSIONS.any {
-            shouldShowRequestPermissionRationale(it)
-        }
+        val needRationale = REQUIRED_PERMISSIONS.any { shouldShowRequestPermissionRationale(it) }
         if (needRationale) {
             AlertDialog.Builder(this)
                 .setTitle("需要权限")
                 .setMessage("录音和通知权限是会议转录功能必需的，请允许授权")
-                .setPositiveButton("去授权") { _, _ ->
-                    permissionLauncher.launch(REQUIRED_PERMISSIONS)
-                }
+                .setPositiveButton("去授权") { _, _ -> permissionLauncher.launch(REQUIRED_PERMISSIONS) }
                 .setNegativeButton("取消", null)
                 .show()
         } else {
@@ -303,10 +260,9 @@ class MainActivity : AppCompatActivity() {
             .setTitle("权限被永久拒绝")
             .setMessage("录音权限已被永久拒绝，请在系统设置中手动开启")
             .setPositiveButton("去设置") { _, _ ->
-                val intent = Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
                     data = android.net.Uri.fromParts("package", packageName, null)
-                }
-                startActivity(intent)
+                })
             }
             .setNegativeButton("取消", null)
             .show()
@@ -315,65 +271,51 @@ class MainActivity : AppCompatActivity() {
     private fun startRecording() {
         try {
             tvTranscript.text = "正在录音..."
-            val serviceIntent = Intent(this, TranscriptionService::class.java).apply {
+            startForegroundService(Intent(this, TranscriptionService::class.java).apply {
                 action = TranscriptionService.ACTION_START
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(serviceIntent)
-            } else {
-                startService(serviceIntent)
-            }
+            })
             isRecording = true
             updateUI()
         } catch (e: Exception) {
             isRecording = false
             tvStatus.text = "启动录音失败: ${e.localizedMessage ?: "未知错误"}"
-            Toast.makeText(this, "启动录音失败，请重试", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "启动录音失败", Toast.LENGTH_SHORT).show()
             updateUI()
         }
     }
 
     private fun stopRecording() {
         try {
-            val serviceIntent = Intent(this, TranscriptionService::class.java).apply {
+            startService(Intent(this, TranscriptionService::class.java).apply {
                 action = TranscriptionService.ACTION_STOP
-            }
-            startService(serviceIntent)
+            })
             isRecording = false
             updateUI()
-            tvTranscript.text = "正在识别中，请稍候..."
-            // 延迟刷新列表（等识别完成）
-            listView.postDelayed({ refreshFileList() }, 5000)
+            tvTranscript.text = "正在识别中..."
+            listView.postDelayed({ refreshFileList() }, 3000)
             listView.postDelayed({
-                // 尝试读取最新的转录文件
                 val dir = getRecordingsDir()
                 val files = dir.listFiles()?.filter { it.name.endsWith(".txt") }
                     ?.sortedByDescending { it.lastModified() }
                 if (files != null && files.isNotEmpty()) {
-                    try {
-                        tvTranscript.text = files.first().readText()
-                    } catch (_: Exception) {}
+                    try { tvTranscript.text = files.first().readText().take(500) } catch (_: Exception) {}
                 } else {
-                    tvTranscript.text = "转录完成（查看录音列表中的 ✓ 标记条目）"
+                    tvTranscript.text = "识别完成（点击录音列表查看）"
                 }
-            }, 5000)
+            }, 3000)
         } catch (e: Exception) {
-            tvStatus.text = "停止录音出错: ${e.localizedMessage ?: "未知错误"}"
+            tvStatus.text = "停止录音出错: ${e.localizedMessage ?: ""}"
         }
     }
 
     private fun updateUI() {
         if (isRecording) {
             btnToggleRecording.text = getString(R.string.stop_recording)
-            btnToggleRecording.setBackgroundTintList(
-                ContextCompat.getColorStateList(this, R.color.red_500)
-            )
+            btnToggleRecording.setBackgroundTintList(ContextCompat.getColorStateList(this, R.color.red_500))
             tvStatus.text = getString(R.string.recording_status)
         } else {
             btnToggleRecording.text = getString(R.string.start_recording)
-            btnToggleRecording.setBackgroundTintList(
-                ContextCompat.getColorStateList(this, R.color.green_500)
-            )
+            btnToggleRecording.setBackgroundTintList(ContextCompat.getColorStateList(this, R.color.green_500))
             tvStatus.text = getString(R.string.idle_status)
         }
     }
