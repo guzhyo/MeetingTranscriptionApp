@@ -42,7 +42,7 @@ class VoskEngine(private val context: Context) {
             return true
         } catch (e: Exception) {
             initError = "模型初始化失败: ${e.localizedMessage ?: "未知错误"}"
-            Log.e(TAG, initError, e)
+            Log.e(TAG, initError!!, e)
             return false
         }
     }
