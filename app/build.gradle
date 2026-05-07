@@ -36,9 +36,6 @@ dependencies {
     implementation 'com.google.android.material:material:1.11.0'
     implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
     
-    // Paraformer 语音识别模型 (FunASR Android SDK)
-    implementation 'com.github.alibaba-damo-academy:FunASR:1.0.0'
-    
     // 轻量级 ONNX Runtime 用于本地推理
     implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.16.3'
 }
