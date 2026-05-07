@@ -273,6 +273,8 @@ class TranscriptionService : Service() {
                 try {
                     if (it.isHeld) {
                         it.release()
+                    } else {
+                        Unit
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "释放 WakeLock 时出错", e)
