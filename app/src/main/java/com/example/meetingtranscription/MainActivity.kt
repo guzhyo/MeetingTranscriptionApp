@@ -7,21 +7,18 @@ import android.os.Build
 import android.os.Bundle
 import android.widget.Button
 import android.widget.TextView
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.google.android.material.button.MaterialButton
 
 class MainActivity : AppCompatActivity() {
 
     companion object {
-        private const val PERMISSION_REQUEST_CODE = 100
-        private val REQUIRED_PERMISSIONS = mutableListOf(
-            Manifest.permission.RECORD_AUDIO
-        ).apply {
-            if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
-                add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-            }
+        private val REQUIRED_PERMISSIONS = buildList {
+            add(Manifest.permission.RECORD_AUDIO)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 add(Manifest.permission.POST_NOTIFICATIONS)
             }
@@ -33,12 +30,29 @@ class MainActivity : AppCompatActivity() {
     private lateinit var tvTranscription: TextView
     private var isRecording = false
 
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { results ->
+        val allGranted = results.values.all { it }
+        if (allGranted) {
+            tvStatus.text = "权限已授予，可以开始录音"
+        } else {
+            val deniedForever = REQUIRED_PERMISSIONS.any { perm ->
+                !results[perm]!! && !shouldShowRequestPermissionRationale(perm)
+            }
+            if (deniedForever) {
+                showPermissionSettingsDialog()
+            } else {
+                tvStatus.text = "需要授权才能使用录音功能"
+                btnToggleRecording.isEnabled = true // 允许重试
+            }
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-
         initViews()
-        checkPermissions()
     }
 
     private fun initViews() {
@@ -50,73 +64,98 @@ class MainActivity : AppCompatActivity() {
             if (isRecording) {
                 stopRecording()
             } else {
-                startRecording()
+                if (hasAllPermissions()) {
+                    startRecording()
+                } else {
+                    requestPermissions()
+                }
             }
         }
     }
 
-    private fun checkPermissions() {
-        val missingPermissions = REQUIRED_PERMISSIONS.filter {
-            ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-        }
-
-        if (missingPermissions.isNotEmpty()) {
-            ActivityCompat.requestPermissions(
-                this,
-                missingPermissions.toTypedArray(),
-                PERMISSION_REQUEST_CODE
-            )
+    private fun hasAllPermissions(): Boolean {
+        return REQUIRED_PERMISSIONS.all {
+            ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
         }
     }
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        if (requestCode == PERMISSION_REQUEST_CODE) {
-            val allGranted = grantResults.all { it == PackageManager.PERMISSION_GRANTED }
-            if (!allGranted) {
-                tvStatus.text = "需要录音权限才能使用"
-                btnToggleRecording.isEnabled = false
-            }
+    private fun requestPermissions() {
+        val needRationale = REQUIRED_PERMISSIONS.any {
+            shouldShowRequestPermissionRationale(it)
         }
+        if (needRationale) {
+            AlertDialog.Builder(this)
+                .setTitle("需要权限")
+                .setMessage("录音和通知权限是会议转录功能必需的，请允许授权")
+                .setPositiveButton("去授权") { _, _ ->
+                    permissionLauncher.launch(REQUIRED_PERMISSIONS)
+                }
+                .setNegativeButton("取消", null)
+                .show()
+        } else {
+            permissionLauncher.launch(REQUIRED_PERMISSIONS)
+        }
+    }
+
+    private fun showPermissionSettingsDialog() {
+        AlertDialog.Builder(this)
+            .setTitle("权限被永久拒绝")
+            .setMessage("录音权限已被永久拒绝，请在系统设置中手动开启")
+            .setPositiveButton("去设置") { _, _ ->
+                val intent = Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = android.net.Uri.fromParts("package", packageName, null)
+                }
+                startActivity(intent)
+            }
+            .setNegativeButton("取消", null)
+            .show()
     }
 
     private fun startRecording() {
-        val serviceIntent = Intent(this, TranscriptionService::class.java).apply {
-            action = TranscriptionService.ACTION_START
+        try {
+            val serviceIntent = Intent(this, TranscriptionService::class.java).apply {
+                action = TranscriptionService.ACTION_START
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(serviceIntent)
+            } else {
+                startService(serviceIntent)
+            }
+            isRecording = true
+            updateUI()
+        } catch (e: Exception) {
+            isRecording = false
+            tvStatus.text = "启动录音失败: ${e.localizedMessage ?: "未知错误"}"
+            Toast.makeText(this, "启动录音失败，请重试", Toast.LENGTH_SHORT).show()
+            updateUI()
         }
-        
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(serviceIntent)
-        } else {
-            startService(serviceIntent)
-        }
-
-        isRecording = true
-        updateUI()
     }
 
     private fun stopRecording() {
-        val serviceIntent = Intent(this, TranscriptionService::class.java).apply {
-            action = TranscriptionService.ACTION_STOP
+        try {
+            val serviceIntent = Intent(this, TranscriptionService::class.java).apply {
+                action = TranscriptionService.ACTION_STOP
+            }
+            startService(serviceIntent)
+            isRecording = false
+            updateUI()
+        } catch (e: Exception) {
+            tvStatus.text = "停止录音出错: ${e.localizedMessage ?: "未知错误"}"
         }
-        startService(serviceIntent)
-
-        isRecording = false
-        updateUI()
     }
 
     private fun updateUI() {
         if (isRecording) {
             btnToggleRecording.text = getString(R.string.stop_recording)
-            btnToggleRecording.setBackgroundColor(getColor(R.color.red_500))
+            btnToggleRecording.setBackgroundTintList(
+                ContextCompat.getColorStateList(this, R.color.red_500)
+            )
             tvStatus.text = getString(R.string.recording_status)
         } else {
             btnToggleRecording.text = getString(R.string.start_recording)
-            btnToggleRecording.setBackgroundColor(getColor(R.color.green_500))
+            btnToggleRecording.setBackgroundTintList(
+                ContextCompat.getColorStateList(this, R.color.green_500)
+            )
             tvStatus.text = getString(R.string.idle_status)
         }
     }
