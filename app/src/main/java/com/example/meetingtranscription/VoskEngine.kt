@@ -29,7 +29,7 @@ class VoskEngine(private val context: Context) {
         try {
             val modelDir = findModelDir() ?: run {
                 initError = "未找到 Vosk 模型，请将 vosk-model-small-cn-0.22 放入手机存储的 VoskModels/ 目录"
-                Log.w(TAG, initError)
+                Log.w(TAG, initError!!)
                 return false
             }
 
