@@ -8,8 +8,8 @@ import java.io.*
 /**
  * Vosk 离线语音识别引擎封装
  *
- * 模型会从外部存储（/sdcard/VoskModels/）复制到 App 内部目录再加载
- * 以避免 Android 11+ 的外部存储访问限制
+ * 从 /sdcard/VoskModels/ 读取模型，逐个文件复制到 App 内部目录后加载
+ * 这样避免 Android 11+ 对外部存储的直接访问限制
  */
 class VoskEngine(private val context: Context) {
 
@@ -27,30 +27,29 @@ class VoskEngine(private val context: Context) {
         if (isInitialized) return true
 
         try {
-            // 获取内部模型目录（App 私有目录，无需权限）
-            val internalModelDir = getInternalModelDir()
+            val internalDir = getInternalModelDir()
 
-            // 检查内部目录是否有模型
-            if (!isModelValid(internalModelDir)) {
-                // 从外部存储复制模型到内部
-                val externalModelDir = findExternalModelDir()
-                if (externalModelDir == null) {
-                    initError = "未找到 Vosk 模型，请将 vosk-model-small-cn-0.22 放入手机存储的 VoskModels/ 目录"
+            // 检查内部是否已有有效模型
+            if (!isModelValid(internalDir)) {
+                // 从外部存储复制
+                val externalDir = findExternalModelDir()
+                if (externalDir == null) {
+                    initError = "未找到 Vosk 模型，请将 vosk-model-small-cn-0.22 放入手机 VoskModels/ 目录"
                     Log.w(TAG, initError!!)
                     return false
                 }
-                Log.i(TAG, "正在从外部存储复制模型到内部目录...")
-                copyModelToInternal(externalModelDir, internalModelDir)
+                Log.i(TAG, "正在复制模型到内部目录...")
+                copyDir(externalDir, internalDir)
             }
 
-            if (!isModelValid(internalModelDir)) {
-                initError = "模型文件不完整，请检查 vosk-model-small-cn-0.22 目录"
+            // 再次检查
+            if (!isModelValid(internalDir)) {
+                initError = "模型文件不完整（缺少 am/final.mdl）"
                 Log.w(TAG, initError!!)
                 return false
             }
 
-            // 从内部目录加载模型
-            model = Model(internalModelDir.absolutePath)
+            model = Model(internalDir.absolutePath)
             recognizer = Recognizer(model, SAMPLE_RATE.toFloat()).apply {
                 setWords(true)
             }
@@ -64,73 +63,61 @@ class VoskEngine(private val context: Context) {
         }
     }
 
-    /**
-     * App 内部模型目录
-     */
     private fun getInternalModelDir(): File {
         return File(context.filesDir, "vosk-model-cn")
     }
 
-    /**
-     * 检查模型目录是否有效（包含必要的文件）
-     */
     private fun isModelValid(dir: File): Boolean {
-        if (!dir.exists()) return false
-        return File(dir, "am/final.mdl").exists()
+        return dir.exists() && File(dir, "am/final.mdl").exists()
     }
 
-    /**
-     * 在外部存储中搜索模型
-     */
     private fun findExternalModelDir(): File? {
-        val searchPaths = listOf(
+        val paths = listOf(
             "/storage/emulated/0/VoskModels",
-            "/sdcard/VoskModels",
-            "/storage/emulated/0/Android/data/${context.packageName}/files/vosk-model",
-            context.filesDir.absolutePath + "/vosk-model"
+            "/sdcard/VoskModels"
         )
-
-        for (basePath in searchPaths) {
-            val baseDir = File(basePath)
-            if (!baseDir.exists()) continue
-
-            // 子目录中查找
-            val dirs = baseDir.listFiles { f -> f.isDirectory } ?: emptyArray()
+        for (basePath in paths) {
+            val base = try { File(basePath) } catch (e: Exception) { null } ?: continue
+            if (!base.exists()) continue
+            val dirs = base.listFiles { f -> f.isDirectory } ?: emptyArray()
             for (dir in dirs) {
-                if (File(dir, "am/final.mdl").exists()) {
-                    Log.i(TAG, "找到外部模型: ${dir.absolutePath}")
-                    return dir
-                }
+                if (File(dir, "am/final.mdl").exists()) return dir
             }
-
-            // basePath 本身就是模型目录
-            if (File(baseDir, "am/final.mdl").exists()) {
-                Log.i(TAG, "找到外部模型: ${baseDir.absolutePath}")
-                return baseDir
-            }
+            if (File(base, "am/final.mdl").exists()) return base
         }
         return null
     }
 
     /**
-     * 将模型从外部目录复制到内部目录
+     * 逐个文件递归复制（兼容 Android 文件系统）
      */
-    private fun copyModelToInternal(source: File, dest: File) {
-        if (dest.exists()) {
-            dest.deleteRecursively()
-        }
-        dest.mkdirs()
+    private fun copyDir(src: File, dst: File) {
+        if (dst.exists()) dst.deleteRecursively()
+        dst.mkdirs()
 
-        source.copyRecursively(dest, overwrite = true)
-        Log.i(TAG, "模型复制完成: ${dest.absolutePath}")
+        src.walkTopDown().forEach { srcFile ->
+            val relPath = srcFile.relativeTo(src)
+            val dstFile = File(dst, relPath.path)
+
+            if (srcFile.isDirectory) {
+                dstFile.mkdirs()
+            } else if (srcFile.isFile) {
+                try {
+                    srcFile.inputStream().use { input ->
+                        dstFile.outputStream().use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "复制文件失败: ${srcFile.name}", e)
+                }
+            }
+        }
+        Log.i(TAG, "模型复制完成: ${dst.absolutePath}")
     }
 
-    /**
-     * 识别 PCM 音频数据
-     */
     fun recognize(pcmData: ShortArray): String {
         val rec = recognizer ?: return initError ?: "引擎未就绪"
-
         return try {
             val byteData = ByteArray(pcmData.size * 2)
             for (i in pcmData.indices) {
@@ -138,24 +125,22 @@ class VoskEngine(private val context: Context) {
                 byteData[i * 2] = (v and 0xFF).toByte()
                 byteData[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
             }
-
             rec.acceptWaveForm(byteData, byteData.size)
-            val finalJson = rec.getFinalResult()
-            extractText(finalJson)
+            extractText(rec.getFinalResult())
         } catch (e: Exception) {
             Log.e(TAG, "识别失败", e)
             "[识别错误]"
         }
     }
 
-    private fun extractText(jsonResult: String): String {
+    private fun extractText(json: String): String {
         return try {
             val key = "\"text\" : \""
-            val start = jsonResult.indexOf(key)
-            if (start >= 0) {
-                val startVal = start + key.length
-                val end = jsonResult.indexOf("\"", startVal)
-                if (end > startVal) jsonResult.substring(startVal, end) else ""
+            val s = json.indexOf(key)
+            if (s >= 0) {
+                val start = s + key.length
+                val end = json.indexOf("\"", start)
+                if (end > start) json.substring(start, end) else ""
             } else ""
         } catch (e: Exception) { "" }
     }
@@ -166,8 +151,6 @@ class VoskEngine(private val context: Context) {
     fun release() {
         try { recognizer?.close() } catch (_: Exception) {}
         try { model?.close() } catch (_: Exception) {}
-        recognizer = null
-        model = null
-        isInitialized = false
+        recognizer = null; model = null; isInitialized = false
     }
 }
