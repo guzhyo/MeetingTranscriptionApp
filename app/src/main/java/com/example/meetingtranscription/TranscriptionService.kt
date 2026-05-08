@@ -185,12 +185,12 @@ class TranscriptionService : Service() {
                 raf.write(byteArrayOf('W'.code.toByte(), 'A'.code.toByte(), 'V'.code.toByte(), 'E'.code.toByte()))
                 raf.write(byteArrayOf('f'.code.toByte(), 'm'.code.toByte(), 't'.code.toByte(), ' '.code.toByte()))
                 raf.writeInt(Integer.reverseBytes(16))
-                raf.writeShort(java.lang.Short.reverseBytes(1.toShort()))       // PCM
-                raf.writeShort(java.lang.Short.reverseBytes(1.toShort()))       // mono
+                raf.write(byteArrayOf(1, 0))       // PCM format = 1 (LE)
+                raf.write(byteArrayOf(1, 0))       // mono = 1 (LE)
                 raf.writeInt(Integer.reverseBytes(16000))             // sample rate
                 raf.writeInt(Integer.reverseBytes(32000))             // byte rate
-                raf.writeShort(java.lang.Short.reverseBytes(2.toShort()))       // block align
-                raf.writeShort(java.lang.Short.reverseBytes(16.toShort()))      // bits per sample
+                raf.write(byteArrayOf(2, 0))       // block align = 2 (LE)
+                raf.write(byteArrayOf(16, 0))      // bits per sample = 16 (LE)
                 raf.write(byteArrayOf('d'.code.toByte(), 'a'.code.toByte(), 't'.code.toByte(), 'a'.code.toByte()))
                 raf.writeInt(Integer.reverseBytes(pcm.size))
                 raf.write(pcm)
