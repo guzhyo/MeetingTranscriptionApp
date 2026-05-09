@@ -72,12 +72,12 @@ class VoskEngine(private val context: Context) {
     /** 喂 PCM 数据给识别器并返回部分结果 */
     fun feedPcm(pcmData: ShortArray): String {
         val rec = recognizer ?: return ""
-        try {
+        return try {
             val bytes = ByteArray(pcmData.size * 2)
             for (i in pcmData.indices) { val v = pcmData[i].toInt(); bytes[i*2] = (v and 0xFF).toByte(); bytes[i*2+1] = ((v shr 8) and 0xFF).toByte() }
             rec.acceptWaveForm(bytes, bytes.size)
-            return extractText(rec.getPartialResult())
-        } catch (e: Exception) { return "" }
+            extractText(rec.getPartialResult())
+        } catch (e: Exception) { Log.w(TAG, "feedPcm error", e); "" }
     }
 
     /** 最终识别 */

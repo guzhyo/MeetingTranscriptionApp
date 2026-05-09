@@ -95,7 +95,9 @@ class TranscriptionService : Service() {
 
             // 初始化 Vosk
             val engine = voskEngine
-            if (engine != null && !engine.isReady()) { engine.initialize() }
+            if (engine != null && !engine.isReady()) {
+                withContext(Dispatchers.IO) { engine.initialize() }
+            }
 
             val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
             if (minBuf in arrayOf(AudioRecord.ERROR, AudioRecord.ERROR_BAD_VALUE)) throw IllegalStateException()
