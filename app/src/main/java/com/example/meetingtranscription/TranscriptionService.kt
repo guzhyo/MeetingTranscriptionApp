@@ -145,6 +145,8 @@ class TranscriptionService : Service() {
                 if (it.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
                     isPaused = false
                     startForeground(NOTIFICATION_ID, createNotification())
+                } else {
+                    Unit
                 }
             } catch (e: Exception) { Log.e(TAG, "恢复录音失败", e) }
         }
