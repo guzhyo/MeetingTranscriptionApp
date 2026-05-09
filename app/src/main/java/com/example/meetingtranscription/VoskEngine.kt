@@ -8,8 +8,7 @@ import java.io.*
 /**
  * Vosk 离线语音识别引擎封装
  *
- * 从 /sdcard/VoskModels/ 读取模型，逐个文件复制到 App 内部目录后加载
- * 这样避免 Android 11+ 对外部存储的直接访问限制
+ * 从 /sdcard/VoskModels/ 读取模型目录，递归复制到 App 内部目录后加载
  */
 class VoskEngine(private val context: Context) {
 
@@ -28,31 +27,25 @@ class VoskEngine(private val context: Context) {
 
         try {
             val internalDir = getInternalModelDir()
+            if (!internalDir.exists() || !isModelValid(internalDir)) {
+                // 查找外部模型
+                val modelDir = findModelDir() ?: return fail("未找到 Vosk 模型，请将 vosk-model-small-cn-0.22 放入手机 VoskModels/ 目录")
 
-            // 检查内部是否已有有效模型
-            if (!isModelValid(internalDir)) {
-                // 从外部存储复制
-                val externalDir = findExternalModelDir()
-                if (externalDir == null) {
-                    initError = "未找到 Vosk 模型，请将 vosk-model-small-cn-0.22 放入手机 VoskModels/ 目录"
-                    Log.w(TAG, initError!!)
-                    return false
+                // 删除旧的内部模型，重新复制
+                if (internalDir.exists()) deleteDir(internalDir)
+                internalDir.mkdirs()
+
+                if (!copyDir(modelDir, internalDir)) {
+                    return fail("复制模型失败")
                 }
-                Log.i(TAG, "正在复制模型到内部目录...")
-                copyDir(externalDir, internalDir)
             }
 
-            // 再次检查
             if (!isModelValid(internalDir)) {
-                initError = "模型文件不完整（缺少 am/final.mdl）"
-                Log.w(TAG, initError!!)
-                return false
+                return fail("模型文件不完整（缺少 am/final.mdl）")
             }
 
             model = Model(internalDir.absolutePath)
-            recognizer = Recognizer(model, SAMPLE_RATE.toFloat()).apply {
-                setWords(true)
-            }
+            recognizer = Recognizer(model, SAMPLE_RATE.toFloat()).apply { setWords(true) }
             isInitialized = true
             Log.i(TAG, "Vosk 引擎初始化成功")
             return true
@@ -63,73 +56,110 @@ class VoskEngine(private val context: Context) {
         }
     }
 
-    private fun getInternalModelDir(): File {
-        return File(context.filesDir, "vosk-model-cn")
+    private fun fail(msg: String): Boolean {
+        initError = msg
+        Log.w(TAG, msg)
+        return false
     }
+
+    private fun getInternalModelDir(): File = File(context.filesDir, "vosk-model-cn")
 
     private fun isModelValid(dir: File): Boolean {
-        return dir.exists() && File(dir, "am/final.mdl").exists()
+        val mdl = File(dir, "am/final.mdl")
+        return mdl.exists() && mdl.length() > 0
     }
 
-    private fun findExternalModelDir(): File? {
-        val paths = listOf(
-            "/storage/emulated/0/VoskModels",
-            "/sdcard/VoskModels"
-        )
-        for (basePath in paths) {
-            val base = try { File(basePath) } catch (e: Exception) { null } ?: continue
+    /** 查找外部存储中的 Vosk 模型目录 */
+    private fun findModelDir(): File? {
+        for (basePath in listOf("/storage/emulated/0/VoskModels", "/sdcard/VoskModels")) {
+            val base = File(basePath)
             if (!base.exists()) continue
-            val dirs = base.listFiles { f -> f.isDirectory } ?: emptyArray()
-            for (dir in dirs) {
-                if (File(dir, "am/final.mdl").exists()) return dir
+
+            // 子目录（如 vosk-model-small-cn-0.22）
+            val dirs = base.listFiles() ?: continue
+            for (d in dirs) {
+                if (d.isDirectory && File(d, "am/final.mdl").exists()) {
+                    Log.i(TAG, "找到模型: ${d.absolutePath}")
+                    return d
+                }
             }
-            if (File(base, "am/final.mdl").exists()) return base
+
+            // 也可能 base 本身是模型目录
+            if (File(base, "am/final.mdl").exists()) {
+                Log.i(TAG, "找到模型: ${base.absolutePath}")
+                return base
+            }
         }
         return null
     }
 
-    /**
-     * 逐个文件递归复制（兼容 Android 文件系统）
-     */
-    private fun copyDir(src: File, dst: File) {
-        if (dst.exists()) dst.deleteRecursively()
-        dst.mkdirs()
+    /** 递归复制目录（兼容 Android API 24） */
+    private fun copyDir(src: File, dst: File): Boolean {
+        try {
+            val queue = ArrayDeque<Pair<File, File>>()
+            queue.add(Pair(src, dst))
 
-        src.walkTopDown().forEach { srcFile ->
-            val relPath = srcFile.relativeTo(src)
-            val dstFile = File(dst, relPath.path)
+            while (queue.isNotEmpty()) {
+                val (srcDir, dstDir) = queue.removeFirst()
+                dstDir.mkdirs()
 
-            if (srcFile.isDirectory) {
-                dstFile.mkdirs()
-            } else if (srcFile.isFile) {
-                try {
-                    srcFile.inputStream().use { input ->
-                        dstFile.outputStream().use { output ->
-                            input.copyTo(output)
-                        }
+                val entries = srcDir.listFiles() ?: continue
+                for (entry in entries) {
+                    val destFile = File(dstDir, entry.name)
+                    if (entry.isDirectory) {
+                        queue.add(Pair(entry, destFile))
+                    } else {
+                        copyFile(entry, destFile)
                     }
-                } catch (e: Exception) {
-                    Log.w(TAG, "复制文件失败: ${srcFile.name}", e)
                 }
             }
+            Log.i(TAG, "模型复制完成: ${dst.absolutePath}")
+            return true
+        } catch (e: Exception) {
+            Log.e(TAG, "复制模型失败", e)
+            return false
         }
-        Log.i(TAG, "模型复制完成: ${dst.absolutePath}")
     }
 
+    private fun deleteDir(dir: File) {
+        val all = dir.listFiles() ?: return
+        for (f in all) {
+            if (f.isDirectory) deleteDir(f)
+            else f.delete()
+        }
+        dir.delete()
+    }
+
+    private fun copyFile(src: File, dst: File) {
+        try {
+            FileInputStream(src).use { `in` ->
+                FileOutputStream(dst).use { out ->
+                    val buf = ByteArray(8192)
+                    var n: Int
+                    while (`in`.read(buf).also { n = it } >= 0) {
+                        out.write(buf, 0, n)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "复制文件失败: ${src.name}", e)
+        }
+    }
+
+    /** 识别 PCM ShortArray */
     fun recognize(pcmData: ShortArray): String {
         val rec = recognizer ?: return initError ?: "引擎未就绪"
         return try {
-            val byteData = ByteArray(pcmData.size * 2)
+            val bytes = ByteArray(pcmData.size * 2)
             for (i in pcmData.indices) {
                 val v = pcmData[i].toInt()
-                byteData[i * 2] = (v and 0xFF).toByte()
-                byteData[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
+                bytes[i * 2] = (v and 0xFF).toByte()
+                bytes[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
             }
-            rec.acceptWaveForm(byteData, byteData.size)
+            rec.acceptWaveForm(bytes, bytes.size)
             extractText(rec.getFinalResult())
         } catch (e: Exception) {
-            Log.e(TAG, "识别失败", e)
-            "[识别错误]"
+            Log.e(TAG, "识别失败", e); "[识别错误]"
         }
     }
 
@@ -142,7 +172,7 @@ class VoskEngine(private val context: Context) {
                 val end = json.indexOf("\"", start)
                 if (end > start) json.substring(start, end) else ""
             } else ""
-        } catch (e: Exception) { "" }
+        } catch (_: Exception) { "" }
     }
 
     fun isReady(): Boolean = isInitialized
