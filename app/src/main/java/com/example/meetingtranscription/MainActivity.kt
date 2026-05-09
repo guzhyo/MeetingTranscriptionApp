@@ -3,26 +3,35 @@ package com.example.meetingtranscription
 import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.BitmapFactory
 import android.media.MediaPlayer
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.provider.MediaStore
+import android.text.Editable
+import android.text.SpannableStringBuilder
+import android.text.style.ImageSpan
 import android.widget.*
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import com.google.android.material.button.MaterialButton
 import java.io.File
+import java.text.SimpleDateFormat
 import java.util.*
-import kotlin.concurrent.schedule
 
 class MainActivity : AppCompatActivity() {
 
     companion object {
         private val REQUIRED_PERMISSIONS = buildList {
             add(Manifest.permission.RECORD_AUDIO)
+            add(Manifest.permission.CAMERA)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) add(Manifest.permission.POST_NOTIFICATIONS)
             if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }.toTypedArray()
@@ -30,30 +39,29 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var btnToggleRecording: MaterialButton
     private lateinit var btnPauseResume: ImageButton
+    private lateinit var btnCamera: ImageButton
     private lateinit var tvStatus: TextView
-    private lateinit var tvTranscript: TextView
+    private lateinit var etTranscript: EditText
     private lateinit var listView: ListView
     private lateinit var btnRefresh: ImageButton
     private lateinit var btnModel: ImageButton
     private lateinit var seekBar: SeekBar
     private lateinit var tvProgress: TextView
+
     private var isRecording = false
     private var isPaused = false
     private val recordingFiles = mutableListOf<File>()
     private var adapter: ArrayAdapter<String>? = null
     private var mediaPlayer: MediaPlayer? = null
     private var playingFile: File? = null
+    private var currentPhotoFile: File? = null
     private val handler = Handler(Looper.getMainLooper())
     private val progressUpdater = object : Runnable {
         override fun run() {
             val mp = mediaPlayer
             if (mp != null && mp.isPlaying) {
-                val pos = mp.currentPosition
-                val dur = mp.duration
-                if (dur > 0) {
-                    seekBar.progress = pos * 100 / dur
-                    tvProgress.text = "${pos / 1000}/${dur / 1000}"
-                }
+                val pos = mp.currentPosition; val dur = mp.duration
+                if (dur > 0) { seekBar.progress = pos * 100 / dur; tvProgress.text = "${pos/1000}/${dur/1000}" }
                 handler.postDelayed(this, 200)
             }
         }
@@ -63,8 +71,13 @@ class MainActivity : AppCompatActivity() {
         val allGranted = results.values.all { it }
         if (!allGranted) {
             val deniedForever = REQUIRED_PERMISSIONS.any { perm -> !results[perm]!! && !shouldShowRequestPermissionRationale(perm) }
-            if (deniedForever) showPermissionSettingsDialog()
-            else Toast.makeText(this, "需要授权才能使用录音功能", Toast.LENGTH_SHORT).show()
+            if (deniedForever) showPermissionSettingsDialog() else Toast.makeText(this, "需要授权", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private val photoLauncher = registerForActivityResult(ActivityResultContracts.TakePicture()) { success ->
+        if (success && currentPhotoFile?.exists() == true) {
+            insertPhotoIntoText(currentPhotoFile!!)
         }
     }
 
@@ -75,8 +88,9 @@ class MainActivity : AppCompatActivity() {
     private fun initViews() {
         btnToggleRecording = findViewById(R.id.btnToggleRecording)
         btnPauseResume = findViewById(R.id.btnPauseResume)
+        btnCamera = findViewById(R.id.btnCamera)
         tvStatus = findViewById(R.id.tvStatus)
-        tvTranscript = findViewById(R.id.tvTranscript)
+        etTranscript = findViewById(R.id.etTranscript)
         listView = findViewById(R.id.listView)
         btnRefresh = findViewById(R.id.btnRefresh)
         btnModel = findViewById(R.id.btnModel)
@@ -92,14 +106,16 @@ class MainActivity : AppCompatActivity() {
             if (isPaused) resumeRecording() else pauseRecording()
         }
         btnPauseResume.visibility = android.view.View.GONE
+
+        btnCamera.setOnClickListener { takePhoto() }
+
         btnRefresh.setOnClickListener { refreshFileList() }
         btnModel.setOnClickListener { showModelDialog() }
 
         seekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
                 if (fromUser && mediaPlayer != null && mediaPlayer!!.isPlaying) {
-                    val dur = mediaPlayer!!.duration
-                    if (dur > 0) mediaPlayer!!.seekTo(dur * progress / 100)
+                    val dur = mediaPlayer!!.duration; if (dur > 0) mediaPlayer!!.seekTo(dur * progress / 100)
                 }
             }
             override fun onStartTrackingTouch(sb: SeekBar?) {}
@@ -111,68 +127,80 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun findVoskModelDir(): File? {
-        val dir = File(filesDir, "vosk-model-cn")
-        return if (File(dir, "am/final.mdl").exists()) dir else null
+    private fun takePhoto() {
+        if (!hasAllPermissions()) { requestPermissions(); return }
+        try {
+            val photoFile = createPhotoFile()
+            currentPhotoFile = photoFile
+            val uri = FileProvider.getUriForFile(this, "${packageName}.fileprovider", photoFile)
+            photoLauncher.launch(uri)
+        } catch (e: Exception) { Toast.makeText(this, "拍照失败: ${e.localizedMessage}", Toast.LENGTH_SHORT).show() }
     }
 
+    private fun createPhotoFile(): File {
+        val dir = File(filesDir, "photos"); if (!dir.exists()) dir.mkdirs()
+        val ts = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+        return File(dir, "IMG_$ts.jpg")
+    }
+
+    private fun insertPhotoIntoText(photoFile: File) {
+        try {
+            // 在光标位置插入图片引用标记 [IMG:文件名]
+            val cursorPos = etTranscript.selectionStart
+            val text = etTranscript.text.toString()
+            val photoTag = "\n[图片: ${photoFile.name}]\n"
+            val newText = StringBuilder(text).insert(if (cursorPos >= 0) cursorPos else text.length, photoTag).toString()
+            etTranscript.setText(newText)
+            etTranscript.setSelection(if (cursorPos >= 0) cursorPos + photoTag.length else newText.length)
+
+            // 显示照片缩略图提示
+            Toast.makeText(this, "照片已插入到文字中", Toast.LENGTH_SHORT).show()
+        } catch (e: Exception) { Toast.makeText(this, "插入照片失败", Toast.LENGTH_SHORT).show() }
+    }
+
+    // --- 模型 ---
+    private fun findModelDir(): File? { val d = File(filesDir, "vosk-model-cn"); return if (File(d, "am/final.mdl").exists()) d else null }
     private fun checkModel() {
-        if (findVoskModelDir() != null) {
-            tvTranscript.text = "✅ Vosk 模型已就绪\n点击开始录音"
-        } else {
-            tvTranscript.text = "首次启动需要解压模型..."
-            VoskEngine(this).also { it.initialize(); it.release() }
-            handler.postDelayed({
-                if (findVoskModelDir() != null) tvTranscript.text = "✅ Vosk 模型已就绪\n点击开始录音"
-                else tvTranscript.text = "⚠ 模型解压中，请稍后..."
-            }, 500)
-        }
+        if (findModelDir() != null) { etTranscript.hint = "✅ 模型已就绪，开始录音吧" }
+        else { etTranscript.setText("首次启动需要解压模型..."); VoskEngine(this).also { it.initialize(); it.release() }; handler.postDelayed({ if (findModelDir() != null) etTranscript.hint = "✅ 模型已就绪" else etTranscript.setText("⚠ 模型解压中，请稍后...") }, 500) }
     }
-
     private fun showModelDialog() {
-        val status = if (findVoskModelDir() != null) "✅ 模型已安装" else "❌ 模型未准备好"
-        AlertDialog.Builder(this).setTitle("Vosk 离线语音模型")
-            .setMessage("$status\n\n模型已内置在 App 中，首次启动自动解压。\n解压完成即可离线识别。\n模型约 42MB。")
-            .setPositiveButton("知道了") { _, _ -> checkModel() }.show()
+        val s = if (findModelDir() != null) "✅ 已安装" else "❌ 未就绪"
+        AlertDialog.Builder(this).setTitle("Vosk 模型").setMessage("$s\n\n模型已内置，首次启动自动解压。").setPositiveButton("知道了") { _, _ -> checkModel() }.show()
     }
 
-    private fun getRecordingsDir(): File { val dir = File(filesDir, "recordings"); if (!dir.exists()) dir.mkdirs(); return dir }
+    // --- 录音文件 ---
+    private fun getRecordingsDir(): File { val d = File(filesDir, "recordings"); if (!d.exists()) d.mkdirs(); return d }
 
     private fun refreshFileList() {
         recordingFiles.clear()
-        val dir = getRecordingsDir()
-        val files = dir.listFiles() ?: emptyArray()
+        val files = getRecordingsDir().listFiles() ?: emptyArray()
         recordingFiles.addAll(files.filter { it.name.endsWith(".wav") }.sortedByDescending { it.lastModified() })
-
-        val names = recordingFiles.map { file ->
-            val txtFile = File(file.parent, "${file.nameWithoutExtension}.txt")
-            val mark = if (txtFile.exists()) " ✓" else ""
-            val nowPlaying = if (file == playingFile) " ▶" else ""
-            "${file.nameWithoutExtension}$mark$nowPlaying"
-        }
-
+        val names = recordingFiles.map { "${it.nameWithoutExtension}${if (File(it.parent, "${it.nameWithoutExtension}.txt").exists()) " ✓" else ""}${if (it == playingFile) " ▶" else ""}" }
         adapter?.clear()
-        adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1,
-            if (names.isEmpty()) mutableListOf("暂无录音记录") else names.toMutableList())
+        adapter = ArrayAdapter(this, android.R.layout.simple_list_item_1, if (names.isEmpty()) mutableListOf("暂无录音记录") else names.toMutableList())
         listView.adapter = adapter
     }
 
     private fun showFileOptions(file: File) {
         val txtFile = File(file.parent, "${file.nameWithoutExtension}.txt")
         val isPlaying = file == playingFile && mediaPlayer?.isPlaying == true
-        val options = mutableListOf<String>().apply {
-            if (isPlaying) add("⏸ 暂停播放") else add("▶ 播放录音")
-            add("📝 查看转录文字")
-            add("🗑 删除录音")
-        }
         AlertDialog.Builder(this).setTitle(file.nameWithoutExtension)
-            .setItems(options.toTypedArray()) { _, which ->
+            .setItems(arrayOf(if (isPlaying) "⏸ 暂停" else "▶ 播放", "📝 查看转录", "📋 复制文字到编辑框", "🗑 删除")) { _, which ->
                 when (which) {
                     0 -> if (isPlaying) pausePlayback() else playRecording(file)
                     1 -> showTranscription(txtFile)
-                    2 -> deleteRecording(file, txtFile)
+                    2 -> copyToEditor(txtFile)
+                    3 -> deleteRecording(file, txtFile)
                 }
             }.show()
+    }
+
+    private fun copyToEditor(txtFile: File) {
+        if (txtFile.exists()) {
+            etTranscript.setText(txtFile.readText())
+            Toast.makeText(this, "已复制到编辑框", Toast.LENGTH_SHORT).show()
+        } else Toast.makeText(this, "暂无转录文字", Toast.LENGTH_SHORT).show()
     }
 
     private fun playRecording(file: File) {
@@ -181,92 +209,107 @@ class MainActivity : AppCompatActivity() {
             mediaPlayer = MediaPlayer().apply {
                 setDataSource(file.absolutePath)
                 setOnCompletionListener { stopPlayback() }
-                setOnErrorListener { _, _, _ -> stopPlayback(); true }
-                prepare()
-                start()
+                setOnErrorListener { _, _, _ -> stopPlayback(); true }; prepare(); start()
             }
-            seekBar.visibility = android.view.View.VISIBLE
-            tvProgress.visibility = android.view.View.VISIBLE
-            handler.post(progressUpdater)
-            tvStatus.text = "▶ 播放: ${file.nameWithoutExtension}"
-            refreshFileList()
+            seekBar.visibility = android.view.View.VISIBLE; tvProgress.visibility = android.view.View.VISIBLE
+            handler.post(progressUpdater); tvStatus.text = "▶ ${file.nameWithoutExtension}"; refreshFileList()
         } catch (e: Exception) { Toast.makeText(this, "播放失败", Toast.LENGTH_SHORT).show(); stopPlayback() }
     }
 
     private fun pausePlayback() {
-        mediaPlayer?.let {
-            if (it.isPlaying) { it.pause(); tvStatus.text = "⏸ 已暂停: ${playingFile?.nameWithoutExtension}" }
-            else { it.start(); tvStatus.text = "▶ 继续播放: ${playingFile?.nameWithoutExtension}"; handler.post(progressUpdater) }
-        }
+        mediaPlayer?.let { if (it.isPlaying) { it.pause(); tvStatus.text = "⏸ 已暂停" } else { it.start(); tvStatus.text = "▶ 继续"; handler.post(progressUpdater) } }
     }
 
-    private fun stopPlayback() {
-        releaseMediaPlayer(); playingFile = null
-        seekBar.visibility = android.view.View.GONE; tvProgress.visibility = android.view.View.GONE
-        tvStatus.text = getString(R.string.idle_status); refreshFileList()
-    }
+    private fun stopPlayback() { releaseMediaPlayer(); playingFile = null; seekBar.visibility = android.view.View.GONE; tvProgress.visibility = android.view.View.GONE; tvStatus.text = getString(R.string.idle_status); refreshFileList() }
 
     private fun showTranscription(txtFile: File) {
         val content = if (txtFile.exists()) txtFile.readText() else "暂无转录文字"
         AlertDialog.Builder(this).setTitle("转录文字 - ${txtFile.nameWithoutExtension}")
-            .setMessage(content.ifBlank { "（录音中未检测到语音内容）" })
-            .setPositiveButton("关闭", null)
-            .setNeutralButton("分享") { _, _ -> startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, content) }, "分享转录文字")) }
-            .show()
+            .setMessage(content.ifBlank { "（无内容）" }).setPositiveButton("关闭", null)
+            .setNeutralButton("复制到编辑框") { _, _ -> etTranscript.setText(content) }
+            .setNegativeButton("分享") { _, _ -> startActivity(Intent.createChooser(Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, content) }, "分享")) }.show()
     }
 
     private fun deleteRecording(wavFile: File, txtFile: File) {
         if (wavFile == playingFile) stopPlayback()
-        AlertDialog.Builder(this).setTitle("确认删除").setMessage("确定要删除「${wavFile.nameWithoutExtension}」吗？")
+        AlertDialog.Builder(this).setTitle("确认删除").setMessage("确定删除「${wavFile.nameWithoutExtension}」？")
             .setPositiveButton("删除") { _, _ -> wavFile.delete(); txtFile.delete(); refreshFileList(); Toast.makeText(this, "已删除", Toast.LENGTH_SHORT).show() }
             .setNegativeButton("取消", null).show()
     }
 
     private fun releaseMediaPlayer() { try { handler.removeCallbacks(progressUpdater); mediaPlayer?.apply { if (isPlaying) stop(); release() } } catch (_: Exception) {}; mediaPlayer = null }
 
+    // --- 权限 ---
     private fun hasAllPermissions(): Boolean = REQUIRED_PERMISSIONS.all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED }
-
     private fun requestPermissions() {
         val needRationale = REQUIRED_PERMISSIONS.any { shouldShowRequestPermissionRationale(it) }
-        if (needRationale) AlertDialog.Builder(this).setTitle("需要权限").setMessage("录音和通知权限是会议转录功能必需的").setPositiveButton("去授权") { _, _ -> permissionLauncher.launch(REQUIRED_PERMISSIONS) }.setNegativeButton("取消", null).show()
+        if (needRationale) AlertDialog.Builder(this).setTitle("需要权限").setMessage("录音、相机和通知权限是必需的").setPositiveButton("去授权") { _, _ -> permissionLauncher.launch(REQUIRED_PERMISSIONS) }.setNegativeButton("取消", null).show()
         else permissionLauncher.launch(REQUIRED_PERMISSIONS)
     }
-
     private fun showPermissionSettingsDialog() {
-        AlertDialog.Builder(this).setTitle("权限被永久拒绝").setMessage("录音权限已被永久拒绝，请在系统设置中手动开启")
+        AlertDialog.Builder(this).setTitle("权限被永久拒绝").setMessage("请在系统设置中手动开启权限")
             .setPositiveButton("去设置") { _, _ -> startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply { data = android.net.Uri.fromParts("package", packageName, null) }) }
             .setNegativeButton("取消", null).show()
     }
 
+    // --- 录音控制 ---
     private fun startRecording() {
         try {
-            tvTranscript.text = "正在录音..."
+            etTranscript.setText("正在录音...")
             startForegroundService(Intent(this, TranscriptionService::class.java).apply { action = TranscriptionService.ACTION_START })
             isRecording = true; isPaused = false; updateUI()
-        } catch (e: Exception) { isRecording = false; tvStatus.text = "启动录音失败"; Toast.makeText(this, "启动录音失败", Toast.LENGTH_SHORT).show(); updateUI() }
+        } catch (e: Exception) { isRecording = false; Toast.makeText(this, "启动失败", Toast.LENGTH_SHORT).show(); updateUI() }
+    }
+    private fun pauseRecording() { startService(Intent(this, TranscriptionService::class.java).apply { action = TranscriptionService.ACTION_PAUSE }); isPaused = true; updateUI() }
+    private fun resumeRecording() { startService(Intent(this, TranscriptionService::class.java).apply { action = TranscriptionService.ACTION_RESUME }); isPaused = false; updateUI() }
+
+    private val partialReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val text = intent.getStringExtra(TranscriptionService.EXTRA_TEXT) ?: return
+            // 在编辑框中追加实时识别结果
+            val current = etTranscript.text.toString()
+            if (current.startsWith("正在录音...") || current.startsWith("正在识别")) {
+                etTranscript.setText(text)
+            } else {
+                // 只更新最后一段
+                val lines = current.split("\n")
+                val sb = StringBuilder()
+                for (i in 0 until lines.size - 1) sb.appendLine(lines[i])
+                sb.append(text)
+                etTranscript.setText(sb.toString())
+            }
+        }
     }
 
-    private fun pauseRecording() {
-        startService(Intent(this, TranscriptionService::class.java).apply { action = TranscriptionService.ACTION_PAUSE })
-        isPaused = true; updateUI()
+    private val finalReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val text = intent.getStringExtra(TranscriptionService.EXTRA_TEXT) ?: return
+            etTranscript.setText(text)
+            // 保存在录音的转录文件中
+            refreshFileList()
+        }
     }
 
-    private fun resumeRecording() {
-        startService(Intent(this, TranscriptionService::class.java).apply { action = TranscriptionService.ACTION_RESUME })
-        isPaused = false; updateUI()
+    override fun onStart() {
+        super.onStart()
+        registerReceiver(partialReceiver, IntentFilter(TranscriptionService.ACTION_PARTIAL),
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) RECEIVER_EXPORTED else 0)
+        registerReceiver(finalReceiver, IntentFilter(TranscriptionService.ACTION_FINAL),
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) RECEIVER_EXPORTED else 0)
+    }
+
+    override fun onStop() {
+        super.onStop()
+        try { unregisterReceiver(partialReceiver) } catch (_: Exception) {}
+        try { unregisterReceiver(finalReceiver) } catch (_: Exception) {}
     }
 
     private fun stopRecording() {
         try {
             startService(Intent(this, TranscriptionService::class.java).apply { action = TranscriptionService.ACTION_STOP })
             isRecording = false; isPaused = false; updateUI()
-            tvTranscript.text = "正在识别中..."
-            handler.postDelayed({ refreshFileList()
-                val dir = getRecordingsDir(); val files = dir.listFiles()?.filter { it.name.endsWith(".txt") }?.sortedByDescending { it.lastModified() }
-                if (files != null && files.isNotEmpty()) { try { tvTranscript.text = files.first().readText().take(500) } catch (_: Exception) {} }
-                else tvTranscript.text = "识别完成（点击录音列表查看）"
-            }, 3000)
-        } catch (e: Exception) { tvStatus.text = "停止录音出错" }
+            handler.postDelayed({ refreshFileList() }, 3000)
+        } catch (_: Exception) {}
     }
 
     private fun updateUI() {
@@ -275,7 +318,7 @@ class MainActivity : AppCompatActivity() {
             btnToggleRecording.setBackgroundTintList(ContextCompat.getColorStateList(this, if (isPaused) R.color.teal_700 else R.color.red_500))
             btnPauseResume.visibility = android.view.View.VISIBLE
             btnPauseResume.setImageResource(if (isPaused) android.R.drawable.ic_media_play else android.R.drawable.ic_media_pause)
-            tvStatus.text = if (isPaused) "⏸ 录音已暂停" else getString(R.string.recording_status)
+            tvStatus.text = if (isPaused) "⏸ 已暂停" else getString(R.string.recording_status)
         } else {
             btnToggleRecording.text = getString(R.string.start_recording)
             btnToggleRecording.setBackgroundTintList(ContextCompat.getColorStateList(this, R.color.green_500))

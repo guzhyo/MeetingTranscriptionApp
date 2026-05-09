@@ -4,19 +4,17 @@ import android.content.Context
 import android.util.Log
 import org.vosk.*
 import java.io.*
-import java.util.zip.ZipInputStream
 
 /**
  * Vosk 离线语音识别引擎封装
- *
- * 模型从 assets 解压到 App 内部目录后加载
+ * 支持实时部分结果和完整结果
  */
 class VoskEngine(private val context: Context) {
 
     companion object {
         private const val TAG = "VoskEngine"
         const val SAMPLE_RATE = 16000
-        private const val ASSETS_MODEL_ZIP = "models/vosk-model-small-cn-0.22.zip"
+        private const val ASSETS_ZIP = "models/vosk-model-small-cn-0.22.zip"
     }
 
     private var model: Model? = null
@@ -26,22 +24,12 @@ class VoskEngine(private val context: Context) {
 
     fun initialize(): Boolean {
         if (isInitialized) return true
-
         try {
             val modelDir = getModelDir()
-
-            // 检查模型是否已解压
             if (!isModelValid(modelDir)) {
-                // 从 assets 解压
-                if (!extractModelFromAssets(modelDir)) {
-                    return fail("从 assets 解压模型失败")
-                }
+                if (!extractModel(modelDir)) return fail("解压模型失败")
             }
-
-            if (!isModelValid(modelDir)) {
-                return fail("模型文件不完整（缺少 am/final.mdl）")
-            }
-
+            if (!isModelValid(modelDir)) return fail("模型文件不完整")
             model = Model(modelDir.absolutePath)
             recognizer = Recognizer(model, SAMPLE_RATE.toFloat()).apply { setWords(true) }
             isInitialized = true
@@ -49,143 +37,65 @@ class VoskEngine(private val context: Context) {
             return true
         } catch (e: Exception) {
             initError = "模型初始化失败: ${e.localizedMessage ?: "未知错误"}"
-            Log.e(TAG, initError!!, e)
-            return false
+            Log.e(TAG, initError!!, e); return false
         }
     }
 
-    private fun fail(msg: String): Boolean {
-        initError = msg; Log.w(TAG, msg); return false
-    }
+    private fun fail(m: String): Boolean { initError = m; Log.w(TAG, m); return false }
 
-    private fun getModelDir(): File = File(context.filesDir, "vosk-model-cn")
+    private fun getModelDir() = File(context.filesDir, "vosk-model-cn")
+    private fun isModelValid(d: File) = File(d, "am/final.mdl").exists()
 
-    private fun isModelValid(dir: File): Boolean {
-        return File(dir, "am/final.mdl").exists()
-    }
-
-    /**
-     * 从 assets 解压模型 zip 到内部存储
-     */
-    private fun extractModelFromAssets(destDir: File): Boolean {
+    private fun extractModel(dst: File): Boolean {
         try {
-            // 删除旧的解压目录
-            if (destDir.exists()) {
-                deleteDir(destDir)
-            }
-            destDir.mkdirs()
-
-            // 读取 assets 中的 zip 文件
-            val zipBytes = readAssetBytes(ASSETS_MODEL_ZIP)
-            if (zipBytes == null) {
-                Log.w(TAG, "assets 中未找到模型 zip: $ASSETS_MODEL_ZIP")
-                return false
-            }
-
-            val zipStream = ZipInputStream(ByteArrayInputStream(zipBytes))
-            var entry = zipStream.nextEntry
-            val buffer = ByteArray(8192)
-
+            if (dst.exists()) { dst.listFiles()?.forEach { if (it.isDirectory) it.deleteRecursively() else it.delete() }; dst.delete() }
+            dst.mkdirs()
+            val bytes = context.assets.open(ASSETS_ZIP).use { it.readBytes() }
+            val zis = java.util.zip.ZipInputStream(ByteArrayInputStream(bytes))
+            var entry = zis.nextEntry
+            val buf = ByteArray(8192)
             while (entry != null) {
                 if (!entry.isDirectory) {
-                    // 去除顶层目录（zip 中可能包含 vosk-model-small-cn-0.22/ 前缀）
-                    val name = stripTopDir(entry.name)
+                    val name = entry.name.substringAfter('/')
                     if (name.isNotEmpty()) {
-                        val outFile = File(destDir, name)
-                        outFile.parentFile?.mkdirs()
-                        FileOutputStream(outFile).use { fos ->
-                            var n: Int
-                            while (zipStream.read(buffer).also { n = it } >= 0) {
-                                fos.write(buffer, 0, n)
-                            }
-                        }
+                        val f = File(dst, name); f.parentFile?.mkdirs()
+                        FileOutputStream(f).use { var n: Int; while (zis.read(buf).also { n = it } >= 0) it.write(buf, 0, n) }
                     }
                 }
-                zipStream.closeEntry()
-                entry = zipStream.nextEntry
+                zis.closeEntry(); entry = zis.nextEntry
             }
-            zipStream.close()
-
-            Log.i(TAG, "模型解压完成: ${destDir.absolutePath}")
-            return true
-        } catch (e: Exception) {
-            Log.e(TAG, "解压模型失败", e)
-            return false
-        }
+            zis.close()
+            Log.i(TAG, "模型解压完成"); return true
+        } catch (e: Exception) { Log.e(TAG, "解压失败", e); return false }
     }
 
-    /**
-     * 读取 assets 文件的全部字节
-     */
-    private fun readAssetBytes(path: String): ByteArray? {
-        return try {
-            context.assets.open(path).use { input ->
-                val baos = ByteArrayOutputStream()
-                val buf = ByteArray(8192)
-                var n: Int
-                while (input.read(buf).also { n = it } >= 0) {
-                    baos.write(buf, 0, n)
-                }
-                baos.toByteArray()
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "读取 assets 失败: $path", e)
-            null
-        }
+    /** 喂 PCM 数据给识别器并返回部分结果 */
+    fun feedPcm(pcmData: ShortArray): String {
+        val rec = recognizer ?: return ""
+        try {
+            val bytes = ByteArray(pcmData.size * 2)
+            for (i in pcmData.indices) { val v = pcmData[i].toInt(); bytes[i*2] = (v and 0xFF).toByte(); bytes[i*2+1] = ((v shr 8) and 0xFF).toByte() }
+            rec.acceptWaveForm(bytes, bytes.size)
+            return extractText(rec.getPartialResult())
+        } catch (e: Exception) { return "" }
     }
 
-    /**
-     * 去除 zip 条目路径的顶层目录
-     * 例如 "vosk-model-small-cn-0.22/am/final.mdl" -> "am/final.mdl"
-     */
-    private fun stripTopDir(path: String): String {
-        val idx = path.indexOf('/')
-        return if (idx >= 0) path.substring(idx + 1) else path
-    }
-
-    private fun deleteDir(dir: File) {
-        val files = dir.listFiles() ?: return
-        for (f in files) {
-            if (f.isDirectory) deleteDir(f) else f.delete()
-        }
-        dir.delete()
-    }
-
-    /** 识别 PCM ShortArray */
+    /** 最终识别 */
     fun recognize(pcmData: ShortArray): String {
         val rec = recognizer ?: return initError ?: "引擎未就绪"
         return try {
             val bytes = ByteArray(pcmData.size * 2)
-            for (i in pcmData.indices) {
-                val v = pcmData[i].toInt()
-                bytes[i * 2] = (v and 0xFF).toByte()
-                bytes[i * 2 + 1] = ((v shr 8) and 0xFF).toByte()
-            }
+            for (i in pcmData.indices) { val v = pcmData[i].toInt(); bytes[i*2] = (v and 0xFF).toByte(); bytes[i*2+1] = ((v shr 8) and 0xFF).toByte() }
             rec.acceptWaveForm(bytes, bytes.size)
             extractText(rec.getFinalResult())
-        } catch (e: Exception) {
-            Log.e(TAG, "识别失败", e); "[识别错误]"
-        }
+        } catch (e: Exception) { Log.e(TAG, "识别失败", e); "[识别错误]" }
     }
 
     private fun extractText(json: String): String {
-        return try {
-            val key = "\"text\" : \""
-            val s = json.indexOf(key)
-            if (s >= 0) {
-                val start = s + key.length
-                val end = json.indexOf("\"", start)
-                if (end > start) json.substring(start, end) else ""
-            } else ""
-        } catch (_: Exception) { "" }
+        return try { val k = "\"text\" : \""; val s = json.indexOf(k); if (s >= 0) { val start = s + k.length; val e = json.indexOf("\"", start); if (e > start) json.substring(start, e) else "" } else "" } catch (_: Exception) { "" }
     }
 
     fun isReady(): Boolean = isInitialized
     fun getInitError(): String? = initError
-
-    fun release() {
-        try { recognizer?.close() } catch (_: Exception) {}
-        try { model?.close() } catch (_: Exception) {}
-        recognizer = null; model = null; isInitialized = false
-    }
+    fun release() { try { recognizer?.close() } catch (_: Exception) {}; try { model?.close() } catch (_: Exception) {}; recognizer = null; model = null; isInitialized = false }
 }
