@@ -91,55 +91,43 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * 检查内部目录中是否有已解压的模型
+     */
     private fun findVoskModelDir(): File? {
-        val paths = listOf(
-            "/storage/emulated/0/VoskModels",
-            "/sdcard/VoskModels"
-        )
-        for (basePath in paths) {
-            val base = File(basePath)
-            if (!base.exists()) continue
-            val dirs = base.listFiles { f -> f.isDirectory } ?: emptyArray()
-            for (dir in dirs) {
-                if (File(dir, "am/final.mdl").exists()) return dir
-            }
-            if (File(base, "am/final.mdl").exists()) return base
-        }
-        return null
+        val dir = File(filesDir, "vosk-model-cn")
+        return if (File(dir, "am/final.mdl").exists()) dir else null
     }
 
     private fun checkModel() {
         val modelDir = findVoskModelDir()
         if (modelDir == null) {
-            tvTranscript.text = "⚠ 未检测到 Vosk 模型\n点击 📦 按钮查看如何安装"
+            tvTranscript.text = "模型正在准备中，首次启动需要解压模型..."
+            // 触发模型解压
+            VoskEngine(this).also { it.initialize(); it.release() }
+            // 再次检查
+            if (findVoskModelDir() != null) {
+                tvTranscript.text = "✅ Vosk 模型已就绪\n点击开始录音"
+            } else {
+                tvTranscript.text = "⚠ 模型解压中，请稍后重试"
+            }
         } else {
-            tvTranscript.text = "✅ Vosk 模型已就绪（${modelDir.name}）\n点击开始录音"
+            tvTranscript.text = "✅ Vosk 模型已就绪\n点击开始录音"
         }
     }
 
     private fun showModelDialog() {
         val modelDir = findVoskModelDir()
-        val status = if (modelDir != null) "✅ 模型已安装: ${modelDir.name}" else "❌ 未检测到模型"
+        val status = if (modelDir != null) "✅ 模型已安装" else "❌ 模型未准备好"
 
         AlertDialog.Builder(this)
             .setTitle("Vosk 离线语音模型")
             .setMessage(
                 "$status\n\n" +
-                "模型安装步骤：\n\n" +
-                "1. 在手机浏览器打开：\n" +
-                "   https://alphacephei.com/vosk/models\n\n" +
-                "2. 下载 vosk-model-small-cn-0.22.zip\n" +
-                "   （约 66MB，中文离线识别）\n\n" +
-                "3. 在手机存储中创建 VoskModels/ 目录\n\n" +
-                "4. 将 zip 解压到 VoskModels/ 下\n" +
-                "   最终路径应为：\n" +
-                "   /sdcard/VoskModels/vosk-model-small-cn-0.22/\n" +
-                "   ├── am/\n" +
-                "   │   └── final.mdl\n" +
-                "   └── ...\n\n" +
-                "💡 你手机里的 vosk-model-small-cn-0.22\n" +
-                "   已经在 ~/workspace/vosk_models/ 下了，\n" +
-                "   复制到 /sdcard/VoskModels/ 即可"
+                "模型已内置在 App 中，首次启动时自动解压。\n" +
+                "解压完成后即可使用离线语音识别功能。\n\n" +
+                "如果模型未加载，请重启 App。\n" +
+                "模型文件约 42MB，解压后约 66MB。"
             )
             .setPositiveButton("知道了") { _, _ -> checkModel() }
             .show()
