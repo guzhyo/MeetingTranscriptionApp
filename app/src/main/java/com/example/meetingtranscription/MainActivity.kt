@@ -268,18 +268,8 @@ class MainActivity : AppCompatActivity() {
     private val partialReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
             val text = intent.getStringExtra(TranscriptionService.EXTRA_TEXT) ?: return
-            // 在编辑框中追加实时识别结果
-            val current = etTranscript.text.toString()
-            if (current.startsWith("正在录音...") || current.startsWith("正在识别")) {
-                etTranscript.setText(text)
-            } else {
-                // 只更新最后一段
-                val lines = current.split("\n")
-                val sb = StringBuilder()
-                for (i in 0 until lines.size - 1) sb.appendLine(lines[i])
-                sb.append(text)
-                etTranscript.setText(sb.toString())
-            }
+            // 实时更新编辑框中的识别文字
+            etTranscript.setText(text)
         }
     }
 

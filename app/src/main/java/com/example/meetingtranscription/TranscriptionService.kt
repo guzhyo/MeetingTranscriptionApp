@@ -97,6 +97,8 @@ class TranscriptionService : Service() {
             val engine = voskEngine
             if (engine != null && !engine.isReady()) {
                 Thread { engine.initialize() }.start()
+            } else if (engine != null) {
+                engine.resetAccumulated()  // 重置累积文本
             }
 
             val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)

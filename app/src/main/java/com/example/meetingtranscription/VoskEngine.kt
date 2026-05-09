@@ -70,24 +70,55 @@ class VoskEngine(private val context: Context) {
     }
 
     /** 喂 PCM 数据给识别器并返回部分结果 */
+    // 缓冲累积的完整段落文本，避免被 PartialResult 覆盖丢失
+    private var accumulatedText = ""
+
     fun feedPcm(pcmData: ShortArray): String {
         val rec = recognizer ?: return ""
         return try {
             val bytes = ByteArray(pcmData.size * 2)
             for (i in pcmData.indices) { val v = pcmData[i].toInt(); bytes[i*2] = (v and 0xFF).toByte(); bytes[i*2+1] = ((v shr 8) and 0xFF).toByte() }
-            rec.acceptWaveForm(bytes, bytes.size)
-            extractText(rec.getPartialResult())
+            val hasResult = rec.acceptWaveForm(bytes, bytes.size)
+
+            if (hasResult) {
+                // acceptWaveForm 返回 true → 有一段完整结果就绪
+                val resultJson = rec.getResult()
+                val resultText = extractText(resultJson)
+                if (resultText.isNotEmpty()) {
+                    // 累积到 accumulatedText 中
+                    if (accumulatedText.isNotEmpty()) accumulatedText += "。"
+                    accumulatedText += resultText
+                }
+            }
+
+            // 返回部分结果（实时预览）+ 已累积的完整结果
+            val partial = extractText(rec.getPartialResult())
+            return if (accumulatedText.isNotEmpty()) {
+                if (partial.isNotEmpty()) "$accumulatedText。$partial" else accumulatedText
+            } else {
+                partial
+            }
         } catch (e: Exception) { Log.w(TAG, "feedPcm error", e); "" }
     }
 
-    /** 最终识别 */
+    /** 重置累积文本（新录音开始时调用） */
+    fun resetAccumulated() { accumulatedText = "" }
+
+    /** 获取累积的完整文本 */
+    fun getAccumulatedText(): String = accumulatedText
+
+    /** 最终识别 — 获取完整的最终识别结果 */
     fun recognize(pcmData: ShortArray): String {
         val rec = recognizer ?: return initError ?: "引擎未就绪"
         return try {
             val bytes = ByteArray(pcmData.size * 2)
             for (i in pcmData.indices) { val v = pcmData[i].toInt(); bytes[i*2] = (v and 0xFF).toByte(); bytes[i*2+1] = ((v shr 8) and 0xFF).toByte() }
+            // 喂剩余数据，然后获取最终结果
             rec.acceptWaveForm(bytes, bytes.size)
-            extractText(rec.getFinalResult())
+            val finalText = extractText(rec.getFinalResult())
+            // 合并 accumulatedText 和 finalText，取更长的那个
+            val acc = getAccumulatedText()
+            return if (finalText.length > acc.length) finalText else acc
         } catch (e: Exception) { Log.e(TAG, "识别失败", e); "[识别错误]" }
     }
 
