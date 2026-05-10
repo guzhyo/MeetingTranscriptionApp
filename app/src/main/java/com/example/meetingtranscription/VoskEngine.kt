@@ -8,6 +8,12 @@ import java.io.*
 /**
  * Vosk 离线语音识别引擎封装
  * 支持实时部分结果和完整结果
+ *
+ * 使用方式：
+ * 1. initialize() — 初始化
+ * 2. startSession() — 开始一次录音会话
+ * 3. feedPcm() — 实时喂 PCM 数据，返回显示文字
+ * 4. stopSession() — 结束会话，获取最终结果
  */
 class VoskEngine(private val context: Context) {
 
@@ -21,6 +27,10 @@ class VoskEngine(private val context: Context) {
     private var recognizer: Recognizer? = null
     private var isInitialized = false
     private var initError: String? = null
+
+    // === 会话状态 ===
+    private var sessionActive = false
+    private var accumulatedText = ""
 
     fun initialize(): Boolean {
         if (isInitialized) return true
@@ -69,64 +79,139 @@ class VoskEngine(private val context: Context) {
         } catch (e: Exception) { Log.e(TAG, "解压失败", e); return false }
     }
 
-    /** 喂 PCM 数据给识别器并返回部分结果 */
-    // 缓冲累积的完整段落文本，避免被 PartialResult 覆盖丢失
-    private var accumulatedText = ""
+    // ========== 会话管理 ==========
 
+    /** 开始一次录音会话，重置内部状态 */
+    fun startSession() {
+        val rec = recognizer
+        if (rec != null) {
+            rec.reset()  // 重置识别器内部状态
+        }
+        accumulatedText = ""
+        sessionActive = true
+        Log.i(TAG, "会话开始")
+    }
+
+    /** 结束录音会话，获取最终完整结果 */
+    fun stopSession(): String {
+        sessionActive = false
+        val rec = recognizer ?: return accumulatedText
+        return try {
+            // 获取 FinalResult 中可能剩余的文本
+            val finalJson = rec.getFinalResult()
+            val finalText = extractText(finalJson)
+
+            Log.i(TAG, "会话结束: acc='${accumulatedText.take(40)}' final='${finalText.take(40)}'")
+            // 合并：accumulated 中已有实时识别的段落（已带标点），final 是最后一段
+            return if (finalText.isNotEmpty()) {
+                val finalWithPunct = addPunctuation(finalText)
+                if (accumulatedText.isNotEmpty()) "$accumulatedText $finalWithPunct" else finalWithPunct
+            } else {
+                accumulatedText
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "stopSession 错误", e)
+            accumulatedText
+        }
+    }
+
+    /** 获取当前会话中累积的完整文本 */
+    fun getAccumulatedText(): String = accumulatedText
+
+    /** 引擎是否就绪 */
+    fun isReady(): Boolean = isInitialized
+
+    /** 获取初始化错误信息 */
+    fun getInitError(): String? = initError
+
+    // ========== 实时识别 ==========
+
+    /** 对中文文本进行简单的标点恢复 */
+    private fun addPunctuation(text: String): String {
+        if (text.isEmpty()) return text
+        var r = text.trim()
+        // 常见的语气词/疑问词 → 加问号
+        r = r.replace(Regex("(吗|呢|吧|么|啊|呀|哈|哦|嘛|嗯|哈|哪|啥|怎|怎么|如何|为什么|什么|哪个|谁|几|多[久少好])(?=\\s*$|，)"), "$1？")
+        // 感叹类 → 感叹号
+        r = r.replace(Regex("(吧|啊|呀|哈|哦|嘛|啦|哇|哟|呢|了)(?=\\s*$|，)"), "$1！")
+        // 连接词 → 逗号
+        r = r.replace(Regex("(你好|您好|谢谢|请问|好的|对了|话说|那么|所以|但是|不过|然而|而且|因为|虽然|如果|然后|首先|其次|最后|总之|此外|另外|比如|例如|特别是|尤其是)"), "$1，")
+        // 结尾加句号（如果没有标点）
+        if (!r.endsWith("。") && !r.endsWith("？") && !r.endsWith("！") && !r.endsWith("，")) r += "。"
+        return r
+    }
+
+    /** 对非末尾段落加句号（完整段落），对末尾保留不加句号（后续还会追加） */
+    private fun finalizeSegment(text: String): String {
+        if (text.isEmpty()) return text
+        var r = text.trim()
+        if (!r.endsWith("。") && !r.endsWith("？") && !r.endsWith("！")) r += "。"
+        return r
+    }
+
+    /**
+     * 喂 PCM 数据给识别器，返回当前应显示的文字
+     *
+     * Vosk API 语义：
+     * - acceptWaveform(bytes) 返回 true → 内部已形成完整段落，应调 getResult() 取出
+     * - 返回 false → 尚未形成完整段落，调 getPartialResult() 获取实时预览
+     *
+     * 返回文字 = 已累积完整段落 + 当前部分结果
+     */
     fun feedPcm(pcmData: ShortArray): String {
-        val rec = recognizer ?: return ""
+        val rec = recognizer ?: return accumulatedText
+        if (!sessionActive) return accumulatedText
         return try {
             val bytes = ByteArray(pcmData.size * 2)
-            for (i in pcmData.indices) { val v = pcmData[i].toInt(); bytes[i*2] = (v and 0xFF).toByte(); bytes[i*2+1] = ((v shr 8) and 0xFF).toByte() }
+            for (i in pcmData.indices) {
+                val v = pcmData[i].toInt()
+                bytes[i*2] = (v and 0xFF).toByte()
+                bytes[i*2+1] = ((v shr 8) and 0xFF).toByte()
+            }
+
             val hasResult = rec.acceptWaveForm(bytes, bytes.size)
 
             if (hasResult) {
-                // acceptWaveForm 返回 true → 有一段完整结果就绪
+                // 完整段落就绪，取出并累积
                 val resultJson = rec.getResult()
                 val resultText = extractText(resultJson)
                 if (resultText.isNotEmpty()) {
-                    // 累积到 accumulatedText 中
-                    if (accumulatedText.isNotEmpty()) accumulatedText += "。"
-                    accumulatedText += resultText
+                    accumulatedText += finalizeSegment(resultText)
                 }
             }
 
-            // 返回部分结果（实时预览）+ 已累积的完整结果
+            // 返回：已累积段落 + 当前实时预览（带标点）
             val partial = extractText(rec.getPartialResult())
+            val displayPartial = addPunctuation(partial)
             return if (accumulatedText.isNotEmpty()) {
-                if (partial.isNotEmpty()) "$accumulatedText。$partial" else accumulatedText
+                if (displayPartial.isNotEmpty()) "$accumulatedText $displayPartial" else accumulatedText
             } else {
-                partial
+                displayPartial
             }
-        } catch (e: Exception) { Log.w(TAG, "feedPcm error", e); "" }
+        } catch (e: Exception) {
+            Log.w(TAG, "feedPcm error", e)
+            accumulatedText
+        }
     }
 
-    /** 重置累积文本（新录音开始时调用） */
-    fun resetAccumulated() { accumulatedText = "" }
-
-    /** 获取累积的完整文本 */
-    fun getAccumulatedText(): String = accumulatedText
-
-    /** 最终识别 — 获取完整的最终识别结果 */
-    fun recognize(pcmData: ShortArray): String {
-        val rec = recognizer ?: return initError ?: "引擎未就绪"
-        return try {
-            val bytes = ByteArray(pcmData.size * 2)
-            for (i in pcmData.indices) { val v = pcmData[i].toInt(); bytes[i*2] = (v and 0xFF).toByte(); bytes[i*2+1] = ((v shr 8) and 0xFF).toByte() }
-            // 喂剩余数据，然后获取最终结果
-            rec.acceptWaveForm(bytes, bytes.size)
-            val finalText = extractText(rec.getFinalResult())
-            // 合并 accumulatedText 和 finalText，取更长的那个
-            val acc = getAccumulatedText()
-            return if (finalText.length > acc.length) finalText else acc
-        } catch (e: Exception) { Log.e(TAG, "识别失败", e); "[识别错误]" }
-    }
+    // ========== 工具方法 ==========
 
     private fun extractText(json: String): String {
-        return try { val k = "\"text\" : \""; val s = json.indexOf(k); if (s >= 0) { val start = s + k.length; val e = json.indexOf("\"", start); if (e > start) json.substring(start, e) else "" } else "" } catch (_: Exception) { "" }
+        return try {
+            val k = "\"text\" : \""
+            val s = json.indexOf(k)
+            if (s >= 0) {
+                val start = s + k.length
+                val e = json.indexOf("\"", start)
+                if (e > start) json.substring(start, e) else ""
+            } else ""
+        } catch (_: Exception) { "" }
     }
 
-    fun isReady(): Boolean = isInitialized
-    fun getInitError(): String? = initError
-    fun release() { try { recognizer?.close() } catch (_: Exception) {}; try { model?.close() } catch (_: Exception) {}; recognizer = null; model = null; isInitialized = false }
+    fun release() {
+        sessionActive = false
+        try { recognizer?.close() } catch (_: Exception) {}
+        try { model?.close() } catch (_: Exception) {}
+        recognizer = null; model = null; isInitialized = false
+    }
 }

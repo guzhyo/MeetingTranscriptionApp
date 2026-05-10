@@ -98,7 +98,7 @@ class TranscriptionService : Service() {
             if (engine != null && !engine.isReady()) {
                 Thread { engine.initialize() }.start()
             } else if (engine != null) {
-                engine.resetAccumulated()  // 重置累积文本
+                engine.startSession()  // 开始新会话
             }
 
             val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
@@ -157,9 +157,7 @@ class TranscriptionService : Service() {
                     saveWav(pcm)
                     val engine = voskEngine
                     if (engine != null && engine.isReady()) {
-                        val sa = ShortArray(pcm.size/2)
-                        for (i in sa.indices) { val l = pcm[i*2].toInt() and 0xFF; val h = pcm[i*2+1].toInt() and 0xFF; sa[i] = (l or (h shl 8)).toShort() }
-                        finalText = engine.recognize(sa)
+                        finalText = engine.stopSession()
                     } else finalText = engine?.getInitError() ?: "模型未就绪"
                     saveTranscript()
                     broadcastFinal(finalText)
