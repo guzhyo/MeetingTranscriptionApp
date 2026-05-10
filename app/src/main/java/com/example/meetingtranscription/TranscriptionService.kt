@@ -93,12 +93,13 @@ class TranscriptionService : Service() {
             val dir = getDir()
             outputWavFile = File(dir, "录音_$ts.wav"); outputTxtFile = File(dir, "录音_$ts.txt")
 
-            // 初始化 Vosk
+            // 初始化 Vosk 并开始会话
             val engine = voskEngine
-            if (engine != null && !engine.isReady()) {
-                Thread { engine.initialize() }.start()
-            } else if (engine != null) {
-                engine.startSession()  // 开始新会话
+            if (engine != null) {
+                if (!engine.isReady()) {
+                    Thread { engine.initialize() }.start()
+                }
+                engine.startSession()  // 无论是否就绪，标记新会话
             }
 
             val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
@@ -114,7 +115,7 @@ class TranscriptionService : Service() {
                 try { recordAndRecognize() }
                 catch (e: Exception) { Log.e(TAG, "异常", e); hasError = true; withContext(Dispatchers.Main) { stopRecording() } }
             }
-        } catch (e: Exception) { Log.e(TAG, "启动失败", e); hasError = true; cleanup(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
+        } catch (e: Exception) { Log.e(TAG, "启动失败", e); hasError = true; cleanupAudioHardware(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
     }
 
     private suspend fun recordAndRecognize() {
@@ -152,18 +153,38 @@ class TranscriptionService : Service() {
         if (!isRecording && !hasError) return; isRecording = false; isPaused = false
         serviceScope.launch {
             try {
+                // 设置 isRecording=false 让 recordAndRecognize 协程退出
+                // 等待协程退出（500ms 后 Vosk 应该已经消化完最后一段）
+                delay(500)
+
+                // 再释放录音硬件
+                cleanupAudioHardware()
+
+                // 短暂等待，让 Vosk 处理完最后一段 PCM 数据
+                delay(500)
+
                 val pcm = pcmBuffer.toByteArray()
                 if (pcm.size > 32000) {
                     saveWav(pcm)
                     val engine = voskEngine
-                    if (engine != null && engine.isReady()) {
-                        finalText = engine.stopSession()
-                    } else finalText = engine?.getInitError() ?: "模型未就绪"
+                    if (engine != null) {
+                        // 等待引擎就绪（如果还在初始化）
+                        var waited = 0
+                        while (!engine.isReady() && waited < 3000) {
+                            delay(200)
+                            waited += 200
+                        }
+                        finalText = if (engine.isReady()) engine.finish() else engine.getInitError() ?: "模型未就绪"
+                    } else {
+                        finalText = "引擎未初始化"
+                    }
                     saveTranscript()
                     broadcastFinal(finalText)
-                } else { outputWavFile?.delete(); outputTxtFile?.delete() }
+                } else {
+                    outputWavFile?.delete(); outputTxtFile?.delete()
+                }
             } catch (e: Exception) { Log.e(TAG, "停止出错", e) }
-            cleanup(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
+            stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
         }
     }
 
@@ -186,10 +207,10 @@ class TranscriptionService : Service() {
         try { f.writeText("会议录音 ${outputWavFile?.nameWithoutExtension}\n录音时间: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())}\n识别引擎: Vosk\n---\n\n${finalText.ifEmpty { "[未检测到语音内容]" }}") } catch (_: Exception) {}
     }
 
-    private fun cleanup() {
+    private fun cleanupAudioHardware() {
         audioRecord?.apply { try { if (recordingState == AudioRecord.RECORDSTATE_RECORDING) stop() } catch (_: Exception) {}; try { release() } catch (_: Exception) {} }; audioRecord = null
         try { wakeLock?.let { if (it.isHeld) it.release() } } catch (_: Exception) {}; wakeLock = null
     }
 
-    override fun onDestroy() { super.onDestroy(); isRecording = false; hasError = true; serviceScope.cancel(); cleanup(); voskEngine?.release(); voskEngine = null }
+    override fun onDestroy() { super.onDestroy(); isRecording = false; hasError = true; serviceScope.cancel(); cleanupAudioHardware(); voskEngine?.release(); voskEngine = null }
 }
